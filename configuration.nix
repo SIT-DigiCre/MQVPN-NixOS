@@ -2,97 +2,56 @@
 
 let
   # ---------------------------------------------------------------------
-  # 1. MQVPNをソースコードからビルド
+  # 1. MQVPN バイナリ組み込み定義（コンパイル不要・超高速ビルド版）
   # ---------------------------------------------------------------------
   mqvpn = pkgs.stdenv.mkDerivation rec {
-    pname = "mqvpn";
+    pname = "mqvpn-binary";
     version = "0.8.0";
 
-    src = pkgs.fetchFromGitHub {
-      owner = "mp0rta";
-      repo = "mqvpn";
-      rev = "v${version}";
-      sha256 = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-      # git clone --recurse-submodules を再現
-      fetchSubmodules = true;
+    # GitHub Releasesからコンパイル済みのバイナリを直接取得します。
+    # ※実際のファイル名（tar.gzか単一バイナリか等）に合わせてURLを微調整してください。
+    src = pkgs.fetchurl {
+      url = "https://github.com/mp0rta/mqvpn/releases/download/v${version}/mqvpn_${version}_amd64.tar.gz";
+      # ダミーハッシュ。初回ビルド時のエラーで本物のハッシュに書き換えます。
+      sha256 = "sha256-ENDGF3lIGwlwo+9QjuGoJyXX2nSyc09KMS5sTenoUfA=";
     };
 
-    # ビルドに必要なツール
-    nativeBuildInputs = [ 
-      pkgs.cmake 
-      pkgs.pkg-config 
-      pkgs.go 
-      pkgs.perl 
-      pkgs.gcc
-    ];
-
-    # 依存ライブラリ
+    # NixOS環境で外部バイナリを動かすための魔法（依存ライブラリのパスを自動解決）
+    nativeBuildInputs = [ pkgs.autoPatchelfHook ];
+    
+    # MQVPN（C/Go）が動的リンクで必要としそうなライブラリ群
     buildInputs = [ 
+      pkgs.stdenv.cc.cc.lib 
       pkgs.libevent 
     ];
 
-    # Nix標準の自動CMake設定をスキップ
-    dontUseCmakeConfigure = true;
-
-    buildPhase = ''
-      export HOME=$TMPDIR
-
-      # 1. Build BoringSSL
-      cd third_party/xquic/third_party/boringssl
-      mkdir -p build && cd build
-      cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
-      make -j$NIX_BUILD_CORES ssl crypto
-      cd ../../../../..
-
-      # 2. Build xquic
-      cd third_party/xquic
-      mkdir -p build && cd build
-      cmake -DCMAKE_BUILD_TYPE=Release -DSSL_TYPE=boringssl \
-            -DSSL_PATH=../third_party/boringssl \
-            -DXQC_ENABLE_BBR2=ON \
-            -DXQC_ENABLE_FEC=ON \
-            -DXQC_ENABLE_XOR=ON ..
-      make -j$NIX_BUILD_CORES
-      cd ../../..
-
-      # 3. Build mqvpn
-      mkdir -p build && cd build
-      cmake -DCMAKE_BUILD_TYPE=Release \
-            -DXQUIC_BUILD_DIR=../third_party/xquic/build ..
-      make -j$NIX_BUILD_CORES
-    '';
+    # アーカイブを展開した後のディレクトリ
+    sourceRoot = ".";
 
     installPhase = ''
       mkdir -p $out/bin
-      cp mqvpn $out/bin/
-      chmod +x $out/bin/mqvpn
+      # 展開されたファイルの中から mqvpn 実行バイナリを探して配置
+      find . -type f -name "*mqvpn*" -executable -exec install -m755 {} $out/bin/mqvpn \;
     '';
   };
 
 in {
   # ---------------------------------------------------------------------
-  # 2. ISOイメージ固有の設定（Live USB用）
+  # 2. ISOイメージ固有の設定
   # ---------------------------------------------------------------------
-  isoImage.isoName = "mqvpn-router.iso";
+  image.fileName = "mqvpn-router.iso";
   isoImage.makeEfiBootable = true;
   isoImage.makeUsbBootable = true;
-
-  # Live環境起動時に最初からネットワークを有効化する
   networking.networkmanager.enable = true;
 
   # ---------------------------------------------------------------------
   # 3. ルーティング & ファイアウォール
   # ---------------------------------------------------------------------
-  boot.kernel.sysctl = {
-    "net.ipv4.ip_forward" = 1;
-  };
-
+  boot.kernel.sysctl = { "net.ipv4.ip_forward" = 1; };
   networking.firewall.enable = true;
   networking.nat = {
     enable = true;
-    # マザーボード内蔵LAN
     internalInterfaces = [ "enp3s0" ]; 
-    # 束ねた後の仮想インターフェース
     externalInterface = "mqvpn0"; 
   };
 
@@ -105,18 +64,14 @@ in {
       interface = "enp3s0";
       bind-interfaces = true;
       listen-address = "10.0.0.1";
-      dhcp-range = "10.0.0.50,10.255.255.254,24h";
-      dhcp-option = [
-        "3,10.0.0.1" # ゲートウェイ
-        "6,10.0.0.1" # DNS
-      ];
+      dhcp-range = "10.0.0.50,10.0.0.254,24h";
+      dhcp-option = [ "3,10.0.0.1" "6,10.0.0.1" ];
     };
   };
 
-  # 内蔵LANのIP固定化
   networking.interfaces.enp3s0.ipv4.addresses = [{
     address = "10.0.0.1";
-    prefixLength = 32;
+    prefixLength = 24;
   }];
 
   # ---------------------------------------------------------------------
@@ -126,12 +81,7 @@ in {
     enable = true;
     port = 9090;
     openFirewall = true;
-    # NetworkManagerをCockpitから操作できるようにする
-    settings = {
-      WebService = {
-        AllowUnencrypted = true;
-      };
-    };
+    settings.WebService.AllowUnencrypted = true;
   };
 
   # ---------------------------------------------------------------------
@@ -150,7 +100,6 @@ in {
       User = "root";
     };
 
-    # 起動時に設定ディレクトリとダミーファイルがなければ作成
     preStart = ''
       mkdir -p /var/lib/mqvpn
       if [ ! -f /var/lib/mqvpn/mqvpn.conf ]; then
@@ -159,9 +108,6 @@ in {
     '';
   };
 
-  # ---------------------------------------------------------------------
-  # 7. システムパッケージ & ロケール
-  # ---------------------------------------------------------------------
   environment.systemPackages = with pkgs; [
     mqvpn
     vim
