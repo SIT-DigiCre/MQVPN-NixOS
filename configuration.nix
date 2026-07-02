@@ -1,6 +1,7 @@
 {
   pkgs,
   config,
+  lib,
   ...
 }:
 
@@ -32,6 +33,7 @@ let
   };
 
   internalInterfaceName = "enp17s0f1";
+  localIp = "172.16.0.1";
 in
 {
   # ---------------------------------------------------------------------
@@ -57,34 +59,114 @@ in
   networking.nat = {
     enable = true;
     internalInterfaces = [ internalInterfaceName ];
-    # externalInterface = "mqvpn0";
-    externalInterface = "enp1s0f2";
+    externalInterface = "mqvpn0";
+    # externalInterface = "enp1s0f2";
   };
+
+  networking.interfaces."mqvpn0".ipv4.routes = [
+    {
+      address =
+        let
+          addr = (builtins.fromJSON (builtins.readFile ./mqvpn.conf)).server_addr;
+        in
+        builtins.head (lib.splitString ":" addr);
+      prefixLength = 32;
+    }
+  ];
 
   # ---------------------------------------------------------------------
   # 4. LAN側：DHCP/DNSサーバー（dnsmasq）
   # ---------------------------------------------------------------------
   networking.interfaces."${internalInterfaceName}".ipv4.addresses = [
     {
-      address = "10.0.0.1";
+      address = localIp;
       prefixLength = 8;
     }
   ];
 
-  services.dnsmasq = {
+  # services.dnsmasq = {
+  #   enable = true;
+  #   settings = {
+  #     interface = internalInterfaceName;
+  #     bind-interfaces = true;
+  #     listen-address =
+  #       (builtins.head config.networking.interfaces."${internalInterfaceName}".ipv4.addresses).address;
+  #     dhcp-range = "10.0.0.50,10.255.255.254,24h";
+  #     dhcp-option = [
+  #       "3,10.0.0.1" # デフォルトゲートウェイ
+  #       "6,10.0.0.1" # DNSサーバ
+  #     ];
+  #     log-dhcp = true;
+  #   };
+  # };
+  services.kea.dhcp4 = {
     enable = true;
     settings = {
-      interface = internalInterfaceName;
-      bind-interfaces = true;
-      listen-address =
-        (builtins.head config.networking.interfaces."${internalInterfaceName}".ipv4.addresses).address;
-      dhcp-range = "10.0.0.50,10.255.255.254,24h";
-      dhcp-option = [
-        "3,10.0.0.1" # デフォルトゲートウェイ
-        "6,10.0.0.1" # DNSサーバ
+      interfaces-config = {
+        interfaces = [ internalInterfaceName ];
+      };
+      valid-lifetime = 3600;
+      renew-timer = 1800;
+      subnet4 = [
+        {
+          id = 1;
+          subnet = "172.16.0.0/12";
+          pools = [
+            {
+              pool = "172.16.0.50 - 172.31.255.254";
+            }
+          ];
+          option-data = [
+            {
+              name = "routers";
+              data = localIp;
+            }
+            {
+              name = "domain-name-servers";
+              data = localIp;
+            }
+          ];
+        }
       ];
-      log-dhcp = true;
+      loggers = [
+        {
+          name = "kea-dhcp4";
+          output_options = [
+            {
+              output = "stdout";
+            }
+          ];
+          severity = "INFO";
+        }
+      ];
     };
+  };
+
+  services.unbound = {
+    enable = true;
+    settings = {
+      server = {
+        interface = [ "0.0.0.0" ];
+        local-data = "\"${config.networking.hostName}.local. IN A ${localIp}\"";
+      };
+      forward-zone = [
+        {
+          name = ".";
+          forward-addr = [
+            "9.9.9.9"
+            "1.1.1.1"
+          ];
+        }
+      ];
+    };
+  };
+  networking.firewall = {
+    allowedTCPPorts = [
+      53
+      80 # netdata用(下記)
+      8080
+    ];
+    allowedUDPPorts = [ 53 ];
   };
 
   # ---------------------------------------------------------------------
@@ -95,6 +177,12 @@ in
     port = 9090;
     openFirewall = true;
     settings.WebService.AllowUnencrypted = true;
+  };
+
+  services.netdata = {
+    enable = true;
+    config.global."bind to" = "0.0.0.0:8080";
+    user = "root";
   };
 
   # ---------------------------------------------------------------------
@@ -118,6 +206,7 @@ in
     vim
     yazi
     btop
+    speedtest-cli
   ];
 
   time.timeZone = "Asia/Tokyo";
