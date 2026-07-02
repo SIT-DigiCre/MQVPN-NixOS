@@ -1,5 +1,6 @@
 {
   pkgs,
+  config,
   ...
 }:
 
@@ -30,9 +31,14 @@ let
     '';
   };
 
-  internalInterfaceName = "enp3s0"; # あとで変える
+  internalInterfaceName = "enp17s0f1";
 in
 {
+  # ---------------------------------------------------------------------
+  # 1. ホスト名をもがみにする
+  # ---------------------------------------------------------------------
+  networking.hostName = "mogami";
+
   # ---------------------------------------------------------------------
   # 2. ISOイメージ固有の設定
   # ---------------------------------------------------------------------
@@ -51,33 +57,35 @@ in
   networking.nat = {
     enable = true;
     internalInterfaces = [ internalInterfaceName ];
-    externalInterface = "mqvpn0";
+    # externalInterface = "mqvpn0";
+    externalInterface = "enp1s0f2";
   };
 
   # ---------------------------------------------------------------------
   # 4. LAN側：DHCP/DNSサーバー（dnsmasq）
   # ---------------------------------------------------------------------
-  services.dnsmasq = {
-    enable = true;
-    settings = {
-      interface = internalInterfaceName;
-      bind-interfaces = true;
-      listen-address = "10.0.0.1";
-      dhcp-range = "10.0.0.50,10.255.255.254,24h";
-      # 不要かも？
-      dhcp-option = [
-        "3,10.0.0.1" # デフォルトゲートウェイ
-        "6,10.0.0.1" # DNSサーバ
-      ];
-    };
-  };
-
   networking.interfaces."${internalInterfaceName}".ipv4.addresses = [
     {
       address = "10.0.0.1";
       prefixLength = 8;
     }
   ];
+
+  services.dnsmasq = {
+    enable = true;
+    settings = {
+      interface = internalInterfaceName;
+      bind-interfaces = true;
+      listen-address =
+        (builtins.head config.networking.interfaces."${internalInterfaceName}".ipv4.addresses).address;
+      dhcp-range = "10.0.0.50,10.255.255.254,24h";
+      dhcp-option = [
+        "3,10.0.0.1" # デフォルトゲートウェイ
+        "6,10.0.0.1" # DNSサーバ
+      ];
+      log-dhcp = true;
+    };
+  };
 
   # ---------------------------------------------------------------------
   # 5. WebUI（Cockpit）設定
@@ -108,10 +116,12 @@ in
 
   environment.systemPackages = with pkgs; [
     vim
+    yazi
+    btop
   ];
 
   time.timeZone = "Asia/Tokyo";
-  i18n.defaultLocale = "ja_JP.UTF-8";
+  # i18n.defaultLocale = "ja_JP.UTF-8";
 
   console.keyMap = "jp106";
 }
