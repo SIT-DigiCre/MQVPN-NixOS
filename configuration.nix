@@ -18,9 +18,9 @@ let
 
     nativeBuildInputs = [ pkgs.autoPatchelfHook ];
 
-    buildInputs = [
-      pkgs.stdenv.cc.cc.lib
-      pkgs.libevent
+    buildInputs = with pkgs; [
+      stdenv.cc.cc.lib
+      libevent
     ];
 
     # アーカイブを展開した後のディレクトリ
@@ -44,9 +44,12 @@ in
   # ---------------------------------------------------------------------
   # 2. ISOイメージ固有の設定
   # ---------------------------------------------------------------------
-  image.fileName = "mqvpn-router.iso";
-  isoImage.makeEfiBootable = true;
-  isoImage.makeUsbBootable = true;
+
+  image.baseName = lib.mkForce "mqvpn-router";
+  isoImage = {
+    makeEfiBootable = true;
+    makeUsbBootable = true;
+  };
   networking.networkmanager.enable = true;
 
   # ---------------------------------------------------------------------
@@ -60,7 +63,6 @@ in
     enable = true;
     internalInterfaces = [ internalInterfaceName ];
     externalInterface = "mqvpn0";
-    # externalInterface = "enp1s0f2";
   };
 
   networking.interfaces."mqvpn0".ipv4.routes = [
@@ -71,7 +73,7 @@ in
         in
         builtins.head (lib.splitString ":" addr);
       prefixLength = 32;
-      via = "10.0.0.1"; 
+      via = "10.0.0.1";
     }
   ];
 
@@ -84,22 +86,6 @@ in
       prefixLength = 12;
     }
   ];
-
-  # services.dnsmasq = {
-  #   enable = true;
-  #   settings = {
-  #     interface = internalInterfaceName;
-  #     bind-interfaces = true;
-  #     listen-address =
-  #       (builtins.head config.networking.interfaces."${internalInterfaceName}".ipv4.addresses).address;
-  #     dhcp-range = "10.0.0.50,10.255.255.254,24h";
-  #     dhcp-option = [
-  #       "3,10.0.0.1" # デフォルトゲートウェイ
-  #       "6,10.0.0.1" # DNSサーバ
-  #     ];
-  #     log-dhcp = true;
-  #   };
-  # };
 
   systemd.services.kea-dhcp4-server = {
     after = [ "network-online.target" ];
@@ -124,13 +110,11 @@ in
       RestartSec = "5s";
     };
   };
-      
+
   services.kea.dhcp4 = {
     enable = true;
     settings = {
-      interfaces-config = {
-        interfaces = [ internalInterfaceName ];
-      };
+      interfaces-config.interfaces = [ internalInterfaceName ];
       valid-lifetime = 3600;
       renew-timer = 1800;
       subnet4 = [
@@ -193,12 +177,11 @@ in
   networking.firewall = {
     allowedTCPPorts = [
       53
-      80 # netdata用(下記)
-      8080
+      8080 # netdata用(下記)
     ];
-    allowedUDPPorts = [ 
+    allowedUDPPorts = [
       53
-      67 
+      67
     ];
   };
 
@@ -243,7 +226,6 @@ in
 
   environment.systemPackages = with pkgs; [
     vim
-    yazi
     btop
     speedtest-cli
   ];
