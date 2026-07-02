@@ -71,6 +71,7 @@ in
         in
         builtins.head (lib.splitString ":" addr);
       prefixLength = 32;
+      via = "10.0.0.1"; 
     }
   ];
 
@@ -80,7 +81,7 @@ in
   networking.interfaces."${internalInterfaceName}".ipv4.addresses = [
     {
       address = localIp;
-      prefixLength = 8;
+      prefixLength = 12;
     }
   ];
 
@@ -99,6 +100,31 @@ in
   #     log-dhcp = true;
   #   };
   # };
+
+  systemd.services.kea-dhcp4-server = {
+    after = [ "network-online.target" ];
+    wants = [ "network-online.target" ];
+
+    preStart = ''
+      echo "Waiting for interface ${internalInterfaceName} to be Running..."
+      for i in {1..120}; do
+        if ${pkgs.iproute2}/bin/ip link show dev "${internalInterfaceName}" 2>/dev/null | grep -q "UP"; then
+          echo "Interface ${internalInterfaceName} is up and running"
+          exit 0
+        fi
+        sleep 1
+      done
+
+      echo "Timeout waiting for interface ${internalInterfaceName}."
+      exit 1
+    '';
+
+    serviceConfig = {
+      Restart = lib.mkForce "always";
+      RestartSec = "5s";
+    };
+  };
+      
   services.kea.dhcp4 = {
     enable = true;
     settings = {
@@ -147,6 +173,10 @@ in
     settings = {
       server = {
         interface = [ "0.0.0.0" ];
+        access-control = [
+          "127.0.0.0/8 allow"
+          "172.16.0.0/12 allow"
+        ];
         local-data = "\"${config.networking.hostName}.local. IN A ${localIp}\"";
       };
       forward-zone = [
@@ -166,7 +196,10 @@ in
       80 # netdata用(下記)
       8080
     ];
-    allowedUDPPorts = [ 53 ];
+    allowedUDPPorts = [ 
+      53
+      67 
+    ];
   };
 
   # ---------------------------------------------------------------------
@@ -193,6 +226,12 @@ in
     after = [ "network-online.target" ];
     wants = [ "network-online.target" ];
     wantedBy = [ "multi-user.target" ];
+
+    path = with pkgs; [
+      iproute2
+      iptables
+      bash
+    ];
 
     serviceConfig = {
       ExecStart = "${mqvpn}/bin/mqvpn --config ${./mqvpn.conf}";
