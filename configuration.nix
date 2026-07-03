@@ -51,9 +51,12 @@ in
   # ---------------------------------------------------------------------
 
   image.baseName = lib.mkForce "mqvpn-router";
+  # 試験の効率を上げるために、より軽量(低圧縮率)なアルゴリズムにしておく
+  isoImage.squashfsCompression = "lz4";
   isoImage = {
     makeEfiBootable = true;
     makeUsbBootable = true;
+    volumeID = lib.mkForce "NixOS-iso";
   };
   networking.networkmanager.enable = true;
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env nix-shell
 #!nix-shell -i bash -p parted dosfstools util-linux coreutils
 
-set -e
+set -euo pipefail
 TARGET_DEV=$1
 
 if [ -z "$TARGET_DEV" ];then
@@ -14,48 +14,53 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
-ISO_FILE="$(dirname "$0")/result/iso/mqvpn-router.iso"
-if [ ! -f "$ISO_FILE" ]; then
-  ISO_FILE="./result/iso/mqvpn-router.iso"
-fi
+ISO_FILE=$(ls "$(dirname "$0")/result/iso"/*.iso ./result/iso/*.iso 2>/dev/null | head -n1)
 
-if [ ! -f "$ISO_FILE" ]; then
-  echo "Error: ISO file not found at $ISO_FILE"
+if [ -z "$ISO_FILE" ]; then
+  echo "Error: ISO file not found"
   echo "Please build the ISO first by running: nix build path:.#nixosConfigurations.iso.config.system.build.isoImage"
   exit 1
 fi
 
-ISO_LABEL=$(blkid -s LABEL -o value "$ISO_FILE" | cut -c 1-11 | tr '[:lower:]' '[:upper:]')
-if [ -z "$ISO_LABEL" ]; then
-  ISO_LABEL="BOOT_ISO"
+RAW_LABEL=$(blkid -s LABEL -o value "$ISO_FILE")
+
+if [ "${#RAW_LABEL}" -gt 11 ]; then
+  echo "Error: ISO volume label '$RAW_LABEL' is too long (${#RAW_LABEL} characters)."
+  echo "Please reduce the label length by changing 'image.baseName' in configuration.nix to 11 characters or less."
+  exit 1
 fi
 
-parted -s "$TARGET_DEV" mklabel gpt
-parted -s "$TARGET_DEV" mkpart primary fat32 1MiB 100%
-parted -s "$TARGET_DEV" set 1 esp on
+ISO_LABEL=${RAW_LABEL^^}
 
-sudo env "PATH=$PATH" partprobe "$TARGET_DEV"
-sleep 3
+parted -s "$TARGET_DEV" -- mklabel gpt mkpart primary fat32 1MiB 100% set 1 esp on
+
+partprobe "$TARGET_DEV"
+udevadm settle
 
 if [[ "$TARGET_DEV" =~ nvme|mmcblk ]]; then
-    PART_DEV="${TARGET_DEV}p1"
+  PART_DEV="${TARGET_DEV}p1"
 else
-    PART_DEV="${TARGET_DEV}1"
+  PART_DEV="${TARGET_DEV}1"
 fi
-
-sleep 2
 
 mkfs.fat -F32 -n "$ISO_LABEL" "$PART_DEV" > /dev/null
 
 MNT_ISO=$(mktemp -d)
 MNT_DEV=$(mktemp -d)
 
-mount -o loop "$ISO_FILE" "$MNT_ISO"
+cleanup() {
+  echo "Cleaning up..."
+  umount -q "$MNT_ISO" "$MNT_DEV" || true
+  rmdir "$MNT_ISO" "$MNT_DEV"
+}
+trap cleanup EXIT
+
+mount -o loop,ro "$ISO_FILE" "$MNT_ISO"
 mount "$PART_DEV" "$MNT_DEV"
 
-cp -a "$MNT_ISO"/* "$MNT_DEV"/
+echo "Copying files from ISO to $PART_DEV..."
+cp -a "$MNT_ISO"/. "$MNT_DEV"/
 
+echo "Syncing disks..."
 sync
-umount "$MNT_ISO" "$MNT_DEV"
-rmdir "$MNT_ISO" "$MNT_DEV"
 

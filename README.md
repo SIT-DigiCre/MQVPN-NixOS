@@ -3,10 +3,11 @@ MQVPNクライアントです
 
 # How to Build & Run
 
-```
-# ISOイメージのビルド
-nix build path:.#nixosConfigurations.iso.config.system.build.isoImage
+## ISOイメージのビルド
+`nix build path:.#nixosConfigurations.iso.config.system.build.isoImage`
 
-# USBへの書き込み (書き込みたいデバイスを調べ、/dev/sdXを書き換える)
-sudo dd if=result/iso/mqvpn-router.iso of=/dev/sdX bs=4M status=progress conv=fdatasync
-```
+## USBメモリへの書き込み
+`sudo dd if=result/iso/mqvpn-router.iso of=/dev/<デバイス名> bs=4M status=progress conv=fdatasync`
+
+## SSDへの書き込み
+`sudo ./writer.sh /dev/<デバイス名>`
