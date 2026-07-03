@@ -78,7 +78,7 @@ in
   ];
 
   # ---------------------------------------------------------------------
-  # 4. LAN側：DHCP/DNSサーバー（dnsmasq）
+  # 4. LAN側：DHCP/DNSサーバー
   # ---------------------------------------------------------------------
   networking.interfaces."${internalInterfaceName}".ipv4.addresses = [
     {
@@ -186,19 +186,13 @@ in
   };
 
   # ---------------------------------------------------------------------
-  # 5. WebUI（Cockpit）設定
+  # 5. WebUI設定
   # ---------------------------------------------------------------------
-  services.cockpit = {
-    enable = true;
-    port = 9090;
-    openFirewall = true;
-    settings.WebService.AllowUnencrypted = true;
-  };
 
-  services.netdata = {
+  services.glances = {
     enable = true;
-    config.global."bind to" = "0.0.0.0:8080";
-    user = "root";
+    openFirewall = true;
+    port = 80;
   };
 
   # ---------------------------------------------------------------------
@@ -214,6 +208,7 @@ in
       iproute2
       iptables
       bash
+      iperf3
     ];
 
     serviceConfig = {
@@ -230,8 +225,27 @@ in
     speedtest-cli
   ];
 
-  time.timeZone = "Asia/Tokyo";
-  # i18n.defaultLocale = "ja_JP.UTF-8";
+  # ---------------------------------------------------------------------
+  # 7. ロケール
+  # ---------------------------------------------------------------------
 
+  time.timeZone = "Asia/Tokyo";
   console.keyMap = "jp106";
+
+  i18n.defaultLocale = "ja_JP.UTF-8";
+  fonts = {
+    fontconfig.enable = true;
+    packages = [
+      pkgs.noto-fonts-cjk-sans
+    ];
+  };
+  hardware.graphics.enable = true;
+  services.kmscon = {
+    enable = true;
+    # hwRender = true;
+    config = {
+      font-name = "Noto Sans Mono CJK JP";
+      font-size = 14;
+    };
+  };
 }
