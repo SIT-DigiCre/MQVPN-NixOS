@@ -49,15 +49,6 @@ in
   # ---------------------------------------------------------------------
   # 2. ISOイメージ固有の設定
   # ---------------------------------------------------------------------
-
-  image.baseName = lib.mkForce "mqvpn-router";
-  # 試験の効率を上げるために、より軽量(低圧縮率)なアルゴリズムにしておく
-  isoImage.squashfsCompression = "lz4";
-  isoImage = {
-    makeEfiBootable = true;
-    makeUsbBootable = true;
-    volumeID = lib.mkForce "NixOS-iso";
-  };
   networking.networkmanager.enable = true;
 
   # ---------------------------------------------------------------------
@@ -240,20 +231,20 @@ in
   time.timeZone = "Asia/Tokyo";
   console.keyMap = "jp106";
 
-  i18n.defaultLocale = "ja_JP.UTF-8";
-  fonts = {
-    fontconfig.enable = true;
-    packages = [
-      pkgs.noto-fonts-cjk-sans
-    ];
-  };
-  hardware.graphics.enable = true;
-  services.kmscon = {
-    enable = true;
-    # hwRender = true;
-    config = {
-      font-name = "Noto Sans Mono CJK JP";
-      font-size = 14;
-    };
-  };
+  # i18n.defaultLocale = "ja_JP.UTF-8";
+  # fonts = {
+  #   fontconfig.enable = true;
+  #   packages = [
+  #     pkgs.noto-fonts-cjk-sans
+  #   ];
+  # };
+  # hardware.graphics.enable = true;
+  # services.kmscon = {
+  #   enable = true;
+  #   # hwRender = true;
+  #   config = {
+  #     font-name = "Noto Sans Mono CJK JP";
+  #     font-size = 14;
+  #   };
+  # };
 }
