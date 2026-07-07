@@ -219,6 +219,7 @@ in
   };
 
   environment.systemPackages = with pkgs; [
+    git
     vim
     btop
     speedtest-cli
@@ -247,4 +248,16 @@ in
   #     font-size = 14;
   #   };
   # };
+
+  # ---------------------------------------------------------------------
+  # 8. ブートローダー・システム状態バージョン
+  # ---------------------------------------------------------------------
+  boot.loader = {
+    systemd-boot.enable = true;
+    efi.canTouchEfiVariables = true;
+    timeout = lib.mkForce 0;
+  };
+  boot.zfs.forceImportRoot = false;
+
+  system.stateVersion = "26.05";
 }
