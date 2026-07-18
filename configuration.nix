@@ -8,12 +8,11 @@
 let
   mqvpn = pkgs.stdenv.mkDerivation rec {
     pname = "mqvpn-binary";
-    version = "0.8.0";
+    version = "0.12.1";
 
-    # GitHub Releasesからコンパイル済みのバイナリを直接取得します。
     src = pkgs.fetchurl {
       url = "https://github.com/mp0rta/mqvpn/releases/download/v${version}/mqvpn_${version}_amd64.tar.gz";
-      sha256 = "sha256-ENDGF3lIGwlwo+9QjuGoJyXX2nSyc09KMS5sTenoUfA=";
+      sha256 = "sha256-KYuWoal/oaGK3xGfOWxoDISelZEqVi28aP8/UK9j7Qw=";
     };
 
     nativeBuildInputs = [ pkgs.autoPatchelfHook ];
@@ -52,6 +51,75 @@ in
   networking.networkmanager.enable = true;
   networking.networkmanager.unmanaged = [ "interface-name:${internalInterfaceName}" ];
 
+  # WANインターフェースのDHCPルートにmetricを設定（enp12s0f1をプライマリに）
+  networking.networkmanager.ensureProfiles.profiles = {
+    "wan-enp12s0f1" = {
+      connection = {
+        id = "wan-enp12s0f1";
+        type = "ethernet";
+        interface-name = "enp12s0f1";
+        autoconnect = true;
+      };
+      ipv4 = {
+        method = "auto";
+        route-metric = 100;
+      };
+      ipv6.method = "disabled";
+    };
+    "wan-enp1s0f0" = {
+      connection = {
+        id = "wan-enp1s0f0";
+        type = "ethernet";
+        interface-name = "enp1s0f0";
+        autoconnect = true;
+      };
+      ipv4 = {
+        method = "auto";
+        route-metric = 200;
+      };
+      ipv6.method = "disabled";
+    };
+    "wan-enp1s0f1" = {
+      connection = {
+        id = "wan-enp1s0f1";
+        type = "ethernet";
+        interface-name = "enp1s0f1";
+        autoconnect = true;
+      };
+      ipv4 = {
+        method = "auto";
+        route-metric = 200;
+      };
+      ipv6.method = "disabled";
+    };
+    "wan-enp1s0f2" = {
+      connection = {
+        id = "wan-enp1s0f2";
+        type = "ethernet";
+        interface-name = "enp1s0f2";
+        autoconnect = true;
+      };
+      ipv4 = {
+        method = "auto";
+        route-metric = 200;
+      };
+      ipv6.method = "disabled";
+    };
+    "wan-enp1s0f3" = {
+      connection = {
+        id = "wan-enp1s0f3";
+        type = "ethernet";
+        interface-name = "enp1s0f3";
+        autoconnect = true;
+      };
+      ipv4 = {
+        method = "auto";
+        route-metric = 200;
+      };
+      ipv6.method = "disabled";
+    };
+  };
+
   # リポジトリ全体をシステムに配置
   systemd.tmpfiles.rules = [
     "C+ /etc/nixos 0755 root root - ${./.}"
@@ -70,18 +138,6 @@ in
     internalInterfaces = [ internalInterfaceName ];
     externalInterface = "mqvpn0";
   };
-
-  networking.interfaces."mqvpn0".ipv4.routes = [
-    {
-      address =
-        let
-          addr = (builtins.fromJSON (builtins.readFile ./mqvpn.conf)).server_addr;
-        in
-        builtins.head (lib.splitString ":" addr);
-      prefixLength = 32;
-      via = "10.0.0.1";
-    }
-  ];
 
   # ---------------------------------------------------------------------
   # 4. LAN側：DHCP/DNSサーバー
@@ -184,7 +240,6 @@ in
     allowedTCPPorts = [
       22
       53
-      8080 # netdata用(下記)
     ];
     allowedUDPPorts = [
       53
@@ -199,7 +254,7 @@ in
   security.sudo.wheelNeedsPassword = false;
 
   # ---------------------------------------------------------------------
-  # 6. SSHサーバー
+  # 6. SSH
   # ---------------------------------------------------------------------
 
   services.openssh = {
@@ -211,7 +266,7 @@ in
   };
 
   # ---------------------------------------------------------------------
-  # 6. WebUI設定
+  # 7. WebUI
   # ---------------------------------------------------------------------
 
   services.glances = {
@@ -221,7 +276,7 @@ in
   };
 
   # ---------------------------------------------------------------------
-  # 6. MQVPN Systemdサービス
+  # 8. MQVPN
   # ---------------------------------------------------------------------
   systemd.services.mqvpn = {
     description = "Multi-Queue VPN Tunnel Daemon";
@@ -252,7 +307,7 @@ in
   ];
 
   # ---------------------------------------------------------------------
-  # 7. ロケール
+  # 9. ロケール
   # ---------------------------------------------------------------------
 
   time.timeZone = "Asia/Tokyo";
@@ -276,7 +331,7 @@ in
   # };
 
   # ---------------------------------------------------------------------
-  # 8. ブートローダー・システム状態バージョン
+  # 10. ブートローダー・システム状態バージョン
   # ---------------------------------------------------------------------
   boot.loader = {
     systemd-boot.enable = true;
