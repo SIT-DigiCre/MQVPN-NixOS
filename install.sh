@@ -33,5 +33,5 @@ fi
 
 echo "=== Running disko-install ==="
 sudo disko-install \
-  --flake "path:$REPO_DIR#router" \
+    --flake "path:$REPO_DIR#mogami" \
   --disk main "$DISK"

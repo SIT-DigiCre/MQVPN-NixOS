@@ -47,10 +47,16 @@ in
   networking.hostName = "mogami";
 
   # ---------------------------------------------------------------------
-  # 2. ISOイメージ固有の設定
+  # 2. 基本設定
   # ---------------------------------------------------------------------
   networking.networkmanager.enable = true;
   networking.networkmanager.unmanaged = [ "interface-name:${internalInterfaceName}" ];
+
+  # リポジトリ全体をシステムに配置
+  systemd.tmpfiles.rules = [
+    "C+ /etc/nixos 0755 root root - ${./.}"
+    "C+ /home/digicre/mqvpn-router 0755 digicre users - ${./.}"
+  ];
 
   # ---------------------------------------------------------------------
   # 3. ルーティング & ファイアウォール
