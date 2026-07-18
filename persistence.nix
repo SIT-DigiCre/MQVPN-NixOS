@@ -7,17 +7,20 @@
   boot.initrd.systemd.services.rollback = {
     description = "Rollback Btrfs root subvolume";
     wantedBy = [ "initrd.target" ];
-    after = [ "dev-disk-by\\x2dlabel-nixos_root.device" ];
+    after = [ "disk-by\\x2dlabel-nixos_root.device" ];
     before = [ "sysroot.mount" ];
     conflicts = [ "initrd-switch-root.target" ];
     unitConfig.DefaultDependencies = "no";
     serviceConfig.Type = "oneshot";
     script = ''
+      while [ ! -e /dev/disk/by-label/nixos_root ]; do
+        sleep 0.1
+      done
       mkdir -p /mnt
       mount -t btrfs -o subvolid=5 /dev/disk/by-label/nixos_root /mnt
 
       if [ -e /mnt/root ]; then
-        btrfs subvolume delete -R /mnt/root
+        btrfs subvolume delete /mnt/root
       fi
 
       btrfs subvolume create /mnt/root
