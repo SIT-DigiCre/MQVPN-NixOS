@@ -40,6 +40,15 @@ in
     description = "MQVPN client auth config (server_addr, auth_key, etc.)";
   };
 
+  options.services.mqvpn.hybrid = lib.mkOption {
+    type = lib.types.anything;
+    default = {
+      enabled = true;
+      tcp = "auto";
+    };
+    description = "MQVPN hybrid TCP lane config";
+  };
+
   config =
     let
       mqvpnAuth = config.services.mqvpn.auth;
@@ -61,10 +70,7 @@ in
             scheduler = "wlb";
             mtu = 1300;
             manage_routes = false;
-            hybrid = {
-              enabled = true;
-              tcp = "auto";
-            };
+            hybrid = config.services.mqvpn.hybrid;
             paths = config.services.mqvpn.interfaces;
           }
           // mqvpnAuth

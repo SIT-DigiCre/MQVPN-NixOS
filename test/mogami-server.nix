@@ -23,6 +23,22 @@
     mkdir -p $out
     cp key.pem cert.pem $out/
   '';
+
+  mqvpnConfig = pkgs.writeText "mqvpn-server.json" (builtins.toJSON {
+    mode = "server";
+    listen = "0.0.0.0:443";
+    subnet = mqvpnServerSubnet;
+    tun_name = "mqvpn0";
+    tls_cert = "${mqvpnCerts}/cert.pem";
+    tls_key = "${mqvpnCerts}/key.pem";
+    auth_key = mqvpnAuthKey;
+    log_level = "debug";
+    hybrid = {
+      enabled = true;
+      tcp = "auto";
+      egress_allow = [ "0.0.0.0/0" ];
+    };
+  });
 in {
   networking.hostName = lib.mkForce "mogami-server";
   networking.usePredictableInterfaceNames = lib.mkForce true;
@@ -46,6 +62,12 @@ in {
     enable = true;
     internalInterfaces = ["mqvpn0"];
     externalInterface = vmWanInterface;
+    extraCommands = ''
+      ${pkgs.iptables}/sbin/iptables -t nat -A nixos-nat-post -o ${vmWanInterface} -s 10.10.0.0/24 -j MASQUERADE
+    '';
+    extraStopCommands = ''
+      ${pkgs.iptables}/sbin/iptables -t nat -D nixos-nat-post -o ${vmWanInterface} -s 10.10.0.0/24 -j MASQUERADE 2>/dev/null || true
+    '';
   };
 
   services.qemuGuest.enable = true;
@@ -68,7 +90,7 @@ in {
     path = with pkgs; [iproute2 iptables];
 
     serviceConfig = {
-      ExecStart = "${mqvpn}/bin/mqvpn --mode server --listen 0.0.0.0:443 --subnet ${mqvpnServerSubnet} --cert ${mqvpnCerts}/cert.pem --key ${mqvpnCerts}/key.pem --auth-key ${mqvpnAuthKey} --log-level debug";
+      ExecStart = "${mqvpn}/bin/mqvpn --config ${mqvpnConfig} --cert ${mqvpnCerts}/cert.pem --key ${mqvpnCerts}/key.pem";
       Restart = "on-failure";
       RestartSec = "5";
     };

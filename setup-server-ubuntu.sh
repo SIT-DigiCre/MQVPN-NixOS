@@ -37,7 +37,7 @@ Commands:
   reinstall   設定ごと再インストール（完全初期化）
 
 Options (environment variables):
-  MQVPN_PORT=${MQVPN_PORT:-443}  MQVPN_SUBNET=${MQVPN_SUBNET:-10.0.0.0/24}
+  MQVPN_PORT=${MQVPN_PORT:-443}  MQVPN_SUBNET=${MQVPN_SUBNET:-192.168.0.0/24}
   MQVPN_AUTH_KEY  認証鍵（未指定時は自動生成）
   MQVPN_TUN=${MQVPN_TUN:-mqvpn0}
   MQVPN_LOG_LEVEL=${MQVPN_LOG_LEVEL:-info}
@@ -62,37 +62,67 @@ if [ "$(id -u)" -ne 0 ] && [ "${SKIP_ROOT_CHECK:-false}" != "true" ]; then
   die "Run as root (or set SKIP_ROOT_CHECK=true)"
 fi
 
-[ "$MODE" != "upgrade" ] && [ -f /etc/mqvpn/server.conf ] && \
+[ "$MODE" = "install" ] && [ -f /etc/mqvpn/server.conf ] && \
   die "Already installed (use 'upgrade' to update binary, or 'reinstall' to wipe and start over)"
 
-if [ ! -f /etc/mqvpn/server.conf ] && [ "$MODE" = "upgrade" ]; then
+EXISTING_CONFIG=""
+if [ -f /etc/mqvpn/server.conf ]; then
+  if head -1 /etc/mqvpn/server.conf | grep -q '^{'; then
+    EXISTING_CONFIG=json
+  else
+    EXISTING_CONFIG=ini
+  fi
+fi
+
+if [ -z "$EXISTING_CONFIG" ] && [ "$MODE" = "upgrade" ]; then
   die "No existing installation found. Run 'install' first."
 fi
 
 # ── Read existing config (for upgrade) ────────────────────
 AUTH_KEY="${MQVPN_AUTH_KEY:-}"
 PORT="${MQVPN_PORT:-443}"
-SUBNET="${MQVPN_SUBNET:-10.0.0.0/24}"
+SUBNET="${MQVPN_SUBNET:-192.168.0.0/24}"
 TLS_CERT="${TLS_CERT:-/etc/mqvpn/server.crt}"
 TLS_KEY="${TLS_KEY:-/etc/mqvpn/server.key}"
 TUN_NAME="${MQVPN_TUN:-mqvpn0}"
 LOG_LEVEL="${MQVPN_LOG_LEVEL:-info}"
 WAN_IF="${MQVPN_WAN_IF:-}"
-REINSTALL_AUTH_KEY=""  # reinstall でもキーだけは引き継ぐ
+REINSTALL_AUTH_KEY=""
 
-if [ -f /etc/mqvpn/server.conf ]; then
+if [ "$EXISTING_CONFIG" = "json" ]; then
+  read_json() { python3 -c "import json; print(json.load(open('/etc/mqvpn/server.conf')).get('$1',''))" 2>/dev/null || true; }
+  AUTH_KEY="${AUTH_KEY:-$(read_json auth_key)}"
+  PORT="${PORT:-$(read_json listen | sed 's/.*://' | grep -o '[0-9]*')}"
+  PORT="${PORT:-443}"
+  SUBNET="${SUBNET:-$(read_json subnet)}"
+  SUBNET="${SUBNET:-192.168.0.0/24}"
+  TLS_CERT="${TLS_CERT:-$(read_json tls_cert)}"
+  TLS_CERT="${TLS_CERT:-/etc/mqvpn/server.crt}"
+  TLS_KEY="${TLS_KEY:-$(read_json tls_key)}"
+  TLS_KEY="${TLS_KEY:-/etc/mqvpn/server.key}"
+  TUN_NAME="${TUN_NAME:-$(read_json tun_name)}"
+  TUN_NAME="${TUN_NAME:-mqvpn0}"
+  LOG_LEVEL="${LOG_LEVEL:-$(read_json log_level)}"
+  LOG_LEVEL="${LOG_LEVEL:-info}"
+elif [ "$EXISTING_CONFIG" = "ini" ]; then
   parse_ini() { sed -n "/^\[$1\]/,/^\[/{ /^[[:space:]]*$2[[:space:]]*=/ { s/.*=[[:space:]]*//p; q } }" /etc/mqvpn/server.conf; }
-  [ -z "$AUTH_KEY" ] && AUTH_KEY=$(parse_ini Auth Key)
-  [ "${MQVPN_PORT:-}" ]    || PORT=$(parse_ini Interface Listen | sed 's/.*://')     && PORT="${PORT:-443}"
-  [ "${MQVPN_SUBNET:-}" ]  || SUBNET=$(parse_ini Interface Subnet)                   && SUBNET="${SUBNET:-10.0.0.0/24}"
-  [ "${TLS_CERT:-}" ]      || TLS_CERT=$(parse_ini TLS Cert)                         && TLS_CERT="${TLS_CERT:-/etc/mqvpn/server.crt}"
-  [ "${TLS_KEY:-}" ]       || TLS_KEY=$(parse_ini TLS Key)                           && TLS_KEY="${TLS_KEY:-/etc/mqvpn/server.key}"
-  [ "${TUN_NAME:-}" ]      || TUN_NAME=$(parse_ini Interface TunName)                 && TUN_NAME="${TUN_NAME:-mqvpn0}"
-  [ "${LOG_LEVEL:-}" ]     || LOG_LEVEL=$(parse_ini Interface LogLevel)               && LOG_LEVEL="${LOG_LEVEL:-info}"
+  AUTH_KEY="${AUTH_KEY:-$(parse_ini Auth Key)}"
+  PORT="${PORT:-$(parse_ini Interface Listen | sed 's/.*://')}"
+  PORT="${PORT:-443}"
+  SUBNET="${SUBNET:-$(parse_ini Interface Subnet)}"
+  SUBNET="${SUBNET:-192.168.0.0/24}"
+  TLS_CERT="${TLS_CERT:-$(parse_ini TLS Cert)}"
+  TLS_CERT="${TLS_CERT:-/etc/mqvpn/server.crt}"
+  TLS_KEY="${TLS_KEY:-$(parse_ini TLS Key)}"
+  TLS_KEY="${TLS_KEY:-/etc/mqvpn/server.key}"
+  TUN_NAME="${TUN_NAME:-$(parse_ini Interface TunName)}"
+  TUN_NAME="${TUN_NAME:-mqvpn0}"
+  LOG_LEVEL="${LOG_LEVEL:-$(parse_ini Interface LogLevel)}"
+  LOG_LEVEL="${LOG_LEVEL:-info}"
+fi
 
-  if [ "$MODE" = "reinstall" ]; then
-    REINSTALL_AUTH_KEY="$AUTH_KEY"
-  fi
+if [ "$MODE" = "reinstall" ] && [ -n "$AUTH_KEY" ]; then
+  REINSTALL_AUTH_KEY="$AUTH_KEY"
 fi
 
 # ── Parameters ──────────────────────────────────────────────
@@ -218,22 +248,23 @@ fi
 # Config
 mkdir -p /etc/mqvpn
 cat > /etc/mqvpn/server.conf <<CFG
-[Interface]
-Listen = 0.0.0.0:${PORT}
-Subnet = ${SUBNET}
-TunName = ${TUN_NAME}
-LogLevel = ${LOG_LEVEL}
-
-[TLS]
-Cert = ${TLS_CERT}
-Key = ${TLS_KEY}
-
-[Auth]
-Key = ${AUTH_KEY}
-MaxClients = 64
-
-[Multipath]
-Scheduler = wlb
+{
+  "mode": "server",
+  "listen": "0.0.0.0:${PORT}",
+  "subnet": "${SUBNET}",
+  "tun_name": "${TUN_NAME}",
+  "tls_cert": "${TLS_CERT}",
+  "tls_key": "${TLS_KEY}",
+  "auth_key": "${AUTH_KEY}",
+  "log_level": "${LOG_LEVEL}",
+  "max_clients": 64,
+  "scheduler": "wlb",
+  "hybrid": {
+    "enabled": true,
+    "tcp": "auto",
+    "egress_allow": ["${SUBNET}"]
+  }
+}
 CFG
 chmod 600 /etc/mqvpn/server.conf
 

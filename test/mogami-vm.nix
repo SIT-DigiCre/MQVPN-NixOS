@@ -64,10 +64,13 @@ in {
     '';
   };
 
-  # テストサーバーの認証情報
   services.mqvpn.auth = {
     server_addr = "10.200.0.1:443";
     auth_key = "mqvpn-test-key-2024";
+  };
+  services.mqvpn.hybrid = {
+    enabled = true;
+    tcp = "auto";
   };
 
   # MQVPN multipath: source-based routing for WAN
