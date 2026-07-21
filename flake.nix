@@ -72,7 +72,6 @@
             ./persistence.nix
             ./configuration.nix
             ./test/mogami-vm.nix
-            ./test/mogami-vm-test.nix
           ];
         };
         mogami-client = nixpkgs.lib.nixosSystem {
