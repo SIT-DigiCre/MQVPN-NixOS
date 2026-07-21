@@ -282,7 +282,6 @@ in
           iproute2
           iptables
           bash
-          iperf3
         ];
 
         serviceConfig = {

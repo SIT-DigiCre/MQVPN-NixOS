@@ -41,8 +41,7 @@
   });
 in {
   networking.hostName = lib.mkForce "mogami-server";
-  networking.usePredictableInterfaceNames = lib.mkForce true;
-  networking.networkmanager.enable = lib.mkForce false;
+  networking.usePredictableInterfaceNames = lib.mkDefault true;
 
   networking.useDHCP = true;
 
@@ -78,8 +77,7 @@ in {
     virtualisation.qemu.options = [];
   };
 
-  hardware.enableRedistributableFirmware = lib.mkForce false;
-  hardware.firmware = lib.mkForce [];
+  hardware.enableRedistributableFirmware = false;
 
   systemd.services.mqvpn-server = {
     description = "MQVPN VPN Server";
@@ -108,7 +106,7 @@ in {
   users.users.digicre = {
     isNormalUser = true;
     extraGroups = ["wheel"];
-    hashedPassword = lib.mkForce null;
+    hashedPassword = null;
     password = "server";
   };
 
@@ -116,11 +114,7 @@ in {
 
   networking.firewall.enable = false;
 
-  swapDevices = lib.mkForce [];
-
-  boot.initrd.systemd.enable = lib.mkForce false;
-
-  boot.resumeDevice = lib.mkForce "";
+  boot.initrd.systemd.enable = false;
 
   system.stateVersion = "26.05";
 

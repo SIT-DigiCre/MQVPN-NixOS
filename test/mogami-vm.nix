@@ -13,7 +13,6 @@
   ip = "${pkgs.iproute2}/bin/ip";
 in {
   networking.hostName = lib.mkForce "mogami-vm";
-  networking.usePredictableInterfaceNames = lib.mkForce true;
 
   networking.useDHCP = false;
 
@@ -67,10 +66,6 @@ in {
   services.mqvpn.auth = {
     server_addr = "10.200.0.1:443";
     auth_key = "mqvpn-test-key-2024";
-  };
-  services.mqvpn.hybrid = {
-    enabled = true;
-    tcp = "auto";
   };
 
   # MQVPN multipath: source-based routing for WAN
@@ -160,10 +155,6 @@ in {
     password = "router";
   };
 
-  swapDevices = lib.mkForce [];
-
-  boot.resumeDevice = lib.mkForce "";
-  boot.initrd.systemd.services.rollback.wantedBy = lib.mkForce [];
 
   systemd.services.kea-dhcp4-server.preStart = lib.mkForce ''
     echo "Waiting for interface ${vmLanInterface} to be Running..."

@@ -11,12 +11,7 @@
   };
 
   outputs =
-    {
-      nixpkgs,
-      disko,
-      impermanence,
-      ...
-    }:
+    { self, nixpkgs, disko, impermanence, ... }:
     let
       inherit (nixpkgs) lib;
     in
@@ -37,10 +32,17 @@
                 makeUsbBootable = true;
               };
 
+              zramSwap.enable = true;
+
+              # インストール対象のシステムを事前ビルドしてISOに含める（インストール時の負荷軽減）
+              system.extraDependencies = [
+                self.nixosConfigurations.mogami.config.system.build.toplevel
+              ];
+
               # リポジトリ全体をライブ環境にコピー
               systemd.tmpfiles.rules = [
                 "C /home/nixos/mqvpn-router 0755 nixos users - ${./.}"
-                "C+ /home/nixos/install.sh 0755 nixos users - ${./install.sh}"
+                "C+ /home/nixos/install-router.sh 0755 nixos users - ${./install-router.sh}"
                 "C+ /root/mqvpn-router 0750 root root - ${./.}"
               ];
 
@@ -66,10 +68,6 @@
         mogami-vm = nixpkgs.lib.nixosSystem {
           system = "x86_64-linux";
           modules = [
-            disko.nixosModules.disko
-            ./disko.nix
-            impermanence.nixosModules.impermanence
-            ./persistence.nix
             ./configuration.nix
             ./test/mogami-vm.nix
           ];

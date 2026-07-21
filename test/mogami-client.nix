@@ -4,7 +4,7 @@
   ...
 }: {
   networking.hostName = "mogami-client";
-  networking.usePredictableInterfaceNames = lib.mkForce true;
+  networking.usePredictableInterfaceNames = lib.mkDefault true;
 
   virtualisation.vmVariant = {
     virtualisation.graphics = false;

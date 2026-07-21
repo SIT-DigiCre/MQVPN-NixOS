@@ -66,12 +66,8 @@ fi
   die "Already installed (use 'upgrade' to update binary, or 'reinstall' to wipe and start over)"
 
 EXISTING_CONFIG=""
-if [ -f /etc/mqvpn/server.conf ]; then
-  if head -1 /etc/mqvpn/server.conf | grep -q '^{'; then
-    EXISTING_CONFIG=json
-  else
-    EXISTING_CONFIG=ini
-  fi
+if [ -f /etc/mqvpn/server.conf ] && head -1 /etc/mqvpn/server.conf | grep -q '^{'; then
+  EXISTING_CONFIG=json
 fi
 
 if [ -z "$EXISTING_CONFIG" ] && [ "$MODE" = "upgrade" ]; then

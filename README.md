@@ -17,7 +17,7 @@ MQVPN クライアント (マルチWAN対応 ルーター)
 1. ISOを起動
 
 ```sh
-sudo ./install.sh <インストール先のディスクのパス>
+sudo ./install-router.sh <インストール先のディスクのパス>
 ```
 
 # Configuration
