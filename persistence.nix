@@ -37,12 +37,13 @@
       "/var/log"
       "/var/lib/NetworkManager"
       {
-        directory = "/var/lib/kea";
+        directory = "/var/lib/private/kea";
         user = "kea";
         group = "kea";
         mode = "0755";
       }
       "/etc/nixos"
+      "/etc/mqvpn"
     ];
     files = [
       "/etc/machine-id"

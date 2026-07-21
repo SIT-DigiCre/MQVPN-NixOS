@@ -35,3 +35,6 @@ echo "=== Running disko-install ==="
 sudo disko-install \
     --flake "path:$REPO_DIR#mogami" \
   --disk main "$DISK"
+
+echo "=== Install complete. Powering off ==="
+sudo poweroff

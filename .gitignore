@@ -1,2 +1,3 @@
-mqvpn.conf
-result
+mqvpn-auth.json
+*.qcow2
+result*
