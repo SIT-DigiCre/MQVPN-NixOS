@@ -1,0 +1,12 @@
+--- a/third_party/xquic/src/transport/xqc_send_ctl.c
++++ b/third_party/xquic/src/transport/xqc_send_ctl.c
+@@ -2000,7 +2000,8 @@
+
+         } else {
+             /* multipath => Before Path Active */
+-            if (path->path_state < XQC_PATH_STATE_ACTIVE) {
++            if (!(conn->conn_flag & XQC_CONN_FLAG_ADDR_VALIDATED)
++                && path->path_state < XQC_PATH_STATE_ACTIVE) {
+                 check = XQC_TRUE;
+             }
+         }
