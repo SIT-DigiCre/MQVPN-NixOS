@@ -75,10 +75,10 @@ SSH 管理用 NIC (`eth3`) のみ `hostfwd` を用いる。
 ### 注意点
 
 - VM ビルダーが `boot.kernelParams` に `net.ifnames=0` を追加するため、`usePredictableInterfaceNames` の設定は実質無効になる。インターフェース名は常に `ethX`。
-- disko/impermanence は実環境と同じく有効。VM 内のディスクイメージ上で Btrfs サブボリュームのロールバックや /persist への保存をテストできる。
+- この VM には disko/impermanence の設定は含まれていない（実機向け `mogami` 設定のみ）。
 - WAN の tap NIC (`eth2`, `eth4-7`) はブリッジ `mqvpn-srv-br0` 経由でサーバー VM に接続する。
 
-# Lab (mogami-vm + mogami-client)
+# Lab (3VM: mogami-vm + mogami-server + mogami-client)
 
 ルーター VM (mogami-vm) + サーバー VM (mogami-server) + クライアント VM (mogami-client) の 3VM ラボ環境。
 MQVPN は 5 本の tap WAN NIC 経由でサーバー VM にマルチパス接続し、そのトンネルをクライアントが利用する。
@@ -103,7 +103,42 @@ host
   WAN: 5× tap (eth2/4-7) → mqvpn-srv-br0 → mogami-server (10.200.0.1:443)
 ```
 
+### IP range 一覧
+
+| セグメント | Range | 構成 |
+|-----------|-------|------|
+| LAN (Client↔Router) | `172.16.0.0/12` | Router `172.16.0.1`, Client `172.16.0.2` |
+| WAN (Router↔Server) | `10.200.0.0/24` | Server `10.200.0.1`, Router `10.200.0.2-6` (5 WAN パス) |
+| MQVPN トンネル | `10.10.0.0/24` | Server `10.10.0.1` (server mode), Router `10.10.0.x` (client) |
+| Router 管理 (SLiRP) | `10.0.3.0/24` | Router `10.0.3.15` (SSH 2223, HTTP 8080) |
+| Client 管理 (SLiRP) | `10.0.2.0/24` | QEMU デフォルト (SSH 2222) |
+| Server 管理 (SLiRP) | `10.0.2.0/24` | QEMU デフォルト (NAT uplink, SSH 2224) |
+
+### NAT 境界 (3段)
+
+Client がインターネットに出るまで 3 段の NAT が直列に入る:
+
+```
+Client (172.16.0.2)
+  → [NAT 1: Router] MASQUERADE on mqvpn0
+    → MQVPN tunnel (10.10.0.0/24)
+      → [NAT 2: Server] MASQUERADE on eth0 (QEMU user-mode)
+        → QEMU user-mode (10.0.2.0/24)
+          → [NAT 3: QEMU SLiRP] ホストネットワークへ
+```
+
+| # | NAT 元 → 出力先 | 実施場所 | 設定ファイル |
+|---|----------------|----------|-------------|
+| 1 | `172.16.0.0/12` → `mqvpn0` | Router VM | `test/mogami-vm.nix:141-146` |
+| 2 | `10.10.0.0/24` → `eth0` (QEMU user-mode) | Server VM | `test/mogami-server.nix:61-71` |
+| 3 | QEMU user-mode NIC (`10.0.2.x`, `10.0.3.x`) → ホストNW | QEMU プロセス (SLiRP) | 各 start スクリプトの `-netdev user` |
+
+- **NAT 1**: ルーターが LAN からのトラフィックを MQVPN トンネルに通す
+- **NAT 2**: サーバーがトンネル復元後のトラフィックを QEMU user-mode NIC 経由で外に出す
+- **NAT 3**: QEMU が VM 内部の user-mode IP をホストのネットワークに NAT する
+
 - **mogami-vm**: ルーター (DHCP/DNS/ファイアウォール/NAT/MQVPNクライアント)
+- **mogami-server**: MQVPN サーバー (トンネル終端, NAT2: tunnel→WAN, `10.200.0.1:443` で待受)
 - **mogami-client**: 下流クライアント（静的IP 172.16.0.2/12, デフォルトGW 172.16.0.1）
 
 ## 使い方
@@ -122,10 +157,10 @@ cp mqvpn-auth.json.example mqvpn-auth.json
 ```
 
 内部で以下を順次実行:
-1. 既存のラボを停止
-2. mogami-vm + mogami-client を Nix ビルド
-3. クライアント用ブリッジ `mqvpn-br0` + tap インターフェースを作成
-4. 2 VM をバックグラウンドで起動（ログは `/tmp/mqvpn-{router,client}.log`）
+1. 既存のラボを停止 (`stop-mogami-lab.sh`)
+2. 3 VM すべてを Nix ビルド (`build-mogami-lab.sh`)
+3. 2 つのブリッジ (`mqvpn-br0` + `mqvpn-srv-br0`) + tap インターフェースを作成
+4. 3 VM をバックグラウンドで起動（ログは `/tmp/mqvpn-{router,server,client}.log`）
 
 終了するには `./test/stop-mogami-lab.sh` を実行する。
 
