@@ -31,10 +31,6 @@ in stdenv.mkDerivation {
     hash = "sha256-IK0SpVsh0kLmIB5vpYw1W1XTH4nn9JeaZ556Vu87nmY=";
   };
 
-  # テスト用に一時的に無効化。xquic マルチパス anti-amplification デッドロック修正パッチ。
-  # 有効にするときはコメントを外す:
-  # patches = [ ./xquic-antiamp-fix.patch ];
-
   dontUseCmakeConfigure = true;
   nativeBuildInputs = with pkgs; [ cmake makeWrapper autoPatchelfHook ];
   buildInputs = with pkgs; [ libevent ];

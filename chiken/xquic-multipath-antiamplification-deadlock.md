@@ -1,5 +1,8 @@
 # xquic マルチパス anti-amplification デッドロック
 
+> **2025-07-26: パッチ (`patches/xquic-antiamp-fix.patch`) は削除済み。**
+> パッチを当てなくてもマルチパスは正常に動作することを確認。
+
 ## 症状
 
 MQVPN クライアントに複数の `paths` を指定しても、path0（初期パス）のみが ACTIVE になる。
