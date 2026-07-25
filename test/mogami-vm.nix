@@ -4,23 +4,23 @@
   pkgs,
   ...
 }: let
-  # ens3:   build-vm default (IPv4LL/link-local, unused)
-  # ens10:  tap tr-mq - LAN (static 172.16.0.1/12)
-  # ens12:  SLiRP mgmt (hostfwd tcp::2223→:22, 10.0.3.0/24)
-  # ens11/13-16:  WAN - 5× tap via mqvpn-srv-br0 → server VM (10.200.0.1)
-  vmLanInterface = "ens10";
-  vmWanInterfaces = ["ens11" "ens13" "ens14" "ens15" "ens16"];
+  # eth0:   build-vm default (IPv4LL/link-local, unused)
+  # eth1:   tap tr-mq - LAN (static 172.16.0.1/12)
+  # eth3:   SLiRP mgmt (hostfwd tcp::2223→:22, 10.0.3.0/24)
+  # eth2/4-7:  WAN - 5× tap via mqvpn-srv-br0 → server VM (10.200.0.1)
+  vmLanInterface = "eth1";
+  vmWanInterfaces = ["eth2" "eth4" "eth5" "eth6" "eth7"];
   ip = "${pkgs.iproute2}/bin/ip";
 in {
   networking.hostName = lib.mkForce "mogami-vm";
 
   networking.useDHCP = false;
 
-  networking.interfaces.ens3.useDHCP = false;
+  networking.interfaces.eth0.useDHCP = false;
 
   # Mgmt (static — SLiRP, SSH port forwarding tcp::2223→:22)
-  networking.interfaces.ens12.useDHCP = false;
-  networking.interfaces.ens12.ipv4.addresses = [{
+  networking.interfaces.eth3.useDHCP = false;
+  networking.interfaces.eth3.ipv4.addresses = [{
     address = "10.0.3.15";
     prefixLength = 24;
   }];
@@ -35,16 +35,16 @@ in {
   };
 
   # WAN (5× tap — 10.200.0.0/24)
-  networking.interfaces.ens11.useDHCP = false;
-  networking.interfaces.ens11.ipv4.addresses = [{ address = "10.200.0.2"; prefixLength = 24; }];
-  networking.interfaces.ens13.useDHCP = false;
-  networking.interfaces.ens13.ipv4.addresses = [{ address = "10.200.0.3"; prefixLength = 24; }];
-  networking.interfaces.ens14.useDHCP = false;
-  networking.interfaces.ens14.ipv4.addresses = [{ address = "10.200.0.4"; prefixLength = 24; }];
-  networking.interfaces.ens15.useDHCP = false;
-  networking.interfaces.ens15.ipv4.addresses = [{ address = "10.200.0.5"; prefixLength = 24; }];
-  networking.interfaces.ens16.useDHCP = false;
-  networking.interfaces.ens16.ipv4.addresses = [{ address = "10.200.0.6"; prefixLength = 24; }];
+  networking.interfaces.eth2.useDHCP = false;
+  networking.interfaces.eth2.ipv4.addresses = [{ address = "10.200.0.2"; prefixLength = 24; }];
+  networking.interfaces.eth4.useDHCP = false;
+  networking.interfaces.eth4.ipv4.addresses = [{ address = "10.200.0.3"; prefixLength = 24; }];
+  networking.interfaces.eth5.useDHCP = false;
+  networking.interfaces.eth5.ipv4.addresses = [{ address = "10.200.0.4"; prefixLength = 24; }];
+  networking.interfaces.eth6.useDHCP = false;
+  networking.interfaces.eth6.ipv4.addresses = [{ address = "10.200.0.5"; prefixLength = 24; }];
+  networking.interfaces.eth7.useDHCP = false;
+  networking.interfaces.eth7.ipv4.addresses = [{ address = "10.200.0.6"; prefixLength = 24; }];
 
   boot.kernel.sysctl."net.ipv4.conf.all.rp_filter" = 2;
   networking.firewall.checkReversePath = false;
@@ -79,27 +79,27 @@ in {
       RemainAfterExit = true;
     };
     script = ''
-      ${ip} route add 10.200.0.0/24 dev ens11 src 10.200.0.2 table 100
-      ${ip} route add default via 10.200.0.1 dev ens11 table 100
+      ${ip} route add 10.200.0.0/24 dev eth2 src 10.200.0.2 table 100
+      ${ip} route add default via 10.200.0.1 dev eth2 table 100
       ${ip} rule add from 10.200.0.2 table 100 priority 100
 
-      ${ip} route add 10.200.0.0/24 dev ens13 src 10.200.0.3 table 101
-      ${ip} route add default via 10.200.0.1 dev ens13 table 101
+      ${ip} route add 10.200.0.0/24 dev eth4 src 10.200.0.3 table 101
+      ${ip} route add default via 10.200.0.1 dev eth4 table 101
       ${ip} rule add from 10.200.0.3 table 101 priority 101
 
-      ${ip} route add 10.200.0.0/24 dev ens14 src 10.200.0.4 table 102
-      ${ip} route add default via 10.200.0.1 dev ens14 table 102
+      ${ip} route add 10.200.0.0/24 dev eth5 src 10.200.0.4 table 102
+      ${ip} route add default via 10.200.0.1 dev eth5 table 102
       ${ip} rule add from 10.200.0.4 table 102 priority 102
 
-      ${ip} route add 10.200.0.0/24 dev ens15 src 10.200.0.5 table 103
-      ${ip} route add default via 10.200.0.1 dev ens15 table 103
+      ${ip} route add 10.200.0.0/24 dev eth6 src 10.200.0.5 table 103
+      ${ip} route add default via 10.200.0.1 dev eth6 table 103
       ${ip} rule add from 10.200.0.5 table 103 priority 103
 
-      ${ip} route add 10.200.0.0/24 dev ens16 src 10.200.0.6 table 104
-      ${ip} route add default via 10.200.0.1 dev ens16 table 104
+      ${ip} route add 10.200.0.0/24 dev eth7 src 10.200.0.6 table 104
+      ${ip} route add default via 10.200.0.1 dev eth7 table 104
       ${ip} rule add from 10.200.0.6 table 104 priority 104
 
-      ${ip} route add default via 10.200.0.1 dev ens11
+      ${ip} route add default via 10.200.0.1 dev eth2
     '';
   };
 
@@ -121,7 +121,7 @@ in {
       ${ip} rule add iif ${vmLanInterface} lookup 42 priority 42
       ${ip} route add 172.16.0.0/12 dev mqvpn0 table 42
       ${ip} route add default dev mqvpn0 table 42
-      ${ip} route add 10.200.0.0/24 dev ens11 table 42
+      ${ip} route add 10.200.0.0/24 dev eth2 table 42
     '';
     preStop = ''
       ${ip} rule del priority 42 2>/dev/null || true
@@ -149,6 +149,8 @@ in {
   services.kea.dhcp4.settings.interfaces-config.interfaces = lib.mkForce [vmLanInterface];
 
   services.mqvpn.interfaces = vmWanInterfaces;
+
+  services.openssh.settings.PasswordAuthentication = lib.mkForce true;
 
   users.users.digicre = {
     hashedPassword = lib.mkForce null;

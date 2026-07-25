@@ -4,7 +4,8 @@
   ...
 }: {
   networking.hostName = "mogami-client";
-  networking.usePredictableInterfaceNames = lib.mkDefault true;
+  # NOTE: usePredictableInterfaceNames は VM ビルダーが boot.kernelParams に
+  # net.ifnames=0 を追加するため実質無効。interface 名は常に ethX になる。
 
   virtualisation.vmVariant = {
     virtualisation.graphics = false;
@@ -15,7 +16,9 @@
     ];
   };
 
-  networking.interfaces."ens3" = {
+  # eth0: tap tc-mq → router VM LAN (172.16.0.0/12)
+  # eth1: QEMU user-mode (SSH port forwarding, internet via NAT)
+  networking.interfaces."eth0" = {
     ipv4.addresses = [
       {
         address = "172.16.0.2";

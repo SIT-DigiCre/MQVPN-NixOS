@@ -4,10 +4,10 @@
   pkgs,
   ...
 }: let
-  # ens3: QEMU user-mode (internet access via NAT)
-  # ens4: tap ts-mq → mqvpn-srv-br0 → router VM (10.200.0.0/24)
-  vmLanInterface = "ens4";
-  vmWanInterface = "ens3";
+  # eth0: QEMU user-mode (internet access via NAT)
+  # eth1: tap ts-mq → mqvpn-srv-br0 → router VM (10.200.0.0/24)
+  vmLanInterface = "eth1";
+  vmWanInterface = "eth0";
   mqvpnServerSubnet = "10.10.0.0/24";
   mqvpnAuthKey = "mqvpn-test-key-2024";
   localIp = "10.200.0.1";
@@ -41,7 +41,8 @@
   });
 in {
   networking.hostName = lib.mkForce "mogami-server";
-  networking.usePredictableInterfaceNames = lib.mkDefault true;
+  # NOTE: usePredictableInterfaceNames は VM ビルダーが boot.kernelParams に
+  # net.ifnames=0 を追加するため実質無効。interface 名は常に ethX になる。
 
   networking.useDHCP = true;
 
@@ -53,7 +54,7 @@ in {
     }];
   };
 
-  # ens3 gets a default route via QEMU user gateway for internet access (NAT external)
+  # eth0 (QEMU user-mode) gets a default route via QEMU gateway for internet access (NAT external)
 
   boot.kernel.sysctl."net.ipv4.ip_forward" = 1;
 
