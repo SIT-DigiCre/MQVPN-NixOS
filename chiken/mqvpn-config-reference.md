@@ -49,8 +49,8 @@
 | `listen` | string | `"0.0.0.0:443"` | サーバーのバインドアドレス `"addr:port"` | `"0.0.0.0:443"` |
 | `subnet` | string | `"10.0.0.0/24"` | トンネル用IPv4サブネット（クライアントに割り当てるIP範囲） | 他と衝突しないもの |
 | `subnet6` | string | — | トンネル用IPv6サブネット例: `"fd00:abcd::/112"` | 必要な場合のみ |
-| `tls_cert` | string | `"server.crt"` | TLS証明書ファイルパス | 適切な証明書へのパス |
-| `tls_key` | string | `"server.key"` | TLS秘密鍵ファイルパス | 適切な鍵へのパス |
+| `cert_file` | string | `"server.crt"` | TLS証明書ファイルパス | 適切な証明書へのパス |
+| `key_file` | string | `"server.key"` | TLS秘密鍵ファイルパス | 適切な鍵へのパス |
 | `auth_key` | string | — | サーバー側のPSK（クライアントの `auth_key` と一致） | クライアントと同じ値 |
 | `users` | array | `[]` | ユーザー認証リスト（user + keyのペア） | クライアント数分 |
 | `max_clients` | int | `64` | 最大同時クライアント数 | 必要に応じて |

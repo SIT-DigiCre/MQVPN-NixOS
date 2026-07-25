@@ -29,8 +29,8 @@
     listen = "0.0.0.0:443";
     subnet = mqvpnServerSubnet;
     tun_name = "mqvpn0";
-    tls_cert = "${mqvpnCerts}/cert.pem";
-    tls_key = "${mqvpnCerts}/key.pem";
+    cert_file = "${mqvpnCerts}/cert.pem";
+    key_file = "${mqvpnCerts}/key.pem";
     auth_key = mqvpnAuthKey;
     log_level = "debug";
     hybrid = {
@@ -89,7 +89,7 @@ in {
     path = with pkgs; [iproute2 iptables];
 
     serviceConfig = {
-      ExecStart = "${mqvpn}/bin/mqvpn --config ${mqvpnConfig} --cert ${mqvpnCerts}/cert.pem --key ${mqvpnCerts}/key.pem";
+      ExecStart = "${mqvpn}/bin/mqvpn --config ${mqvpnConfig}";
       Restart = "on-failure";
       RestartSec = "5";
     };
