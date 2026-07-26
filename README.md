@@ -2,7 +2,35 @@
 
 MQVPN クライアント (マルチWAN対応 ルーター)
 
-**一番安定している回線（低レイテンシ・高信頼）はマザーボードのLAN端子 (`enp12s0f1`) に接続すること。** 初期ハンドシェイクはこの回線で行われるため、起動時の接続が最も速くなる。WLB の重み付けは実測 RTT で動的に決まるため、どのポートに何を刺しても運用中のバランシングに影響はない。
+# 要するに
+
+## 構築手順
+
+1. Nixをインストールする(Windows非対応。WSLとか使ってください)。https://github.com/NixOS/nix-installer が良いと思います。
+1. サーバを設定する(https://github.com/mp0rta/mqvpn の`README.md`などを参照)
+1. ./configuration.nixのservices.mqvpn.interfacesを、WANを接続する可能性のあるNIC一覧に書き換える。
+  一番安定している回線（低レイテンシ・高信頼）は、ここで一番初めに指定したNICに接続すると良い。
+  初期ハンドシェイクはこの回線で行われるため、起動時の接続が最も速くなる。
+1. Configuration の欄にある指示に従い、mqvpn-auth.jsonを作る
+1. How to Build & Runの指示に従い、ルータPCにインストールする
+
+## ひとことメモ
+
+分からないことがあれば、このリポジトリのコントリビュータかLLMに聞いてください。
+NICの一覧は`ip a`、ディスクの一覧は`lsblk -d`で出ます。
+configuration.nixの編集については、とりあえずインストーラを起動してからインストーラ環境で`ip a`をして、
+NIC一覧を見てからローカルで編集し、commitとpushをする という形で良いかもしれません。
+./install-router.shは自動で`git pull`してくれます。
+
+## ちなみに
+
+chiken/の内容は、LLMの、LLMによる、LLMのためのメモ集です。
+たぶん人は読まない方が良いです
+
+## テスト環境
+
+実機にある程度近い環境をVMで立てます。
+詳しくは下の方にあります。
 
 # How to Build & Run
 
@@ -129,13 +157,6 @@ Client (172.16.0.2)
 
 ## 使い方
 
-### 事前準備
-
-```sh
-cp mqvpn-auth.json.example mqvpn-auth.json
-# 実サーバーの server_addr と auth_key を記入
-```
-
 ### 一括起動（推奨）
 
 ```sh
@@ -144,7 +165,7 @@ cp mqvpn-auth.json.example mqvpn-auth.json
 
 内部で以下を順次実行:
 1. 既存のラボを停止 (`stop-mogami-lab.sh`)
-2. 3 VM すべてを Nix ビルド (`build-mogami-lab.sh`)
+2. 3 VM すべてをビルド (`build-mogami-lab.sh`)
 3. 2 つのブリッジ (`mqvpn-br0` + `mqvpn-srv-br0`) + tap インターフェースを作成
 4. 3 VM をバックグラウンドで起動（ログは `/tmp/mqvpn-{router,server,client}.log`）
 
