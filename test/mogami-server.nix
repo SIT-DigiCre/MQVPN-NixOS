@@ -12,7 +12,7 @@
   mqvpnAuthKey = "mqvpn-test-key-2024";
   localIp = "10.200.0.1";
 
-  mqvpn = pkgs.callPackage ../patches/mqvpn-src.nix { };
+  mqvpn = pkgs.callPackage ../pkgs/mqvpn.nix { };
 
   mqvpnCerts = pkgs.runCommand "mqvpn-certs" {
     nativeBuildInputs = [pkgs.openssl];
