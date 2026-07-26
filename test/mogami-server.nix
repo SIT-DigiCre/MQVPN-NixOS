@@ -8,7 +8,7 @@
   # eth1: tap ts-mq → mqvpn-srv-br0 → router VM (10.200.0.0/24)
   vmLanInterface = "eth1";
   vmWanInterface = "eth0";
-  mqvpnServerSubnet = "10.10.0.0/24";
+  mqvpnServerSubnet = "192.168.0.0/24";
   mqvpnAuthKey = "mqvpn-test-key-2024";
   localIp = "10.200.0.1";
 
@@ -62,12 +62,7 @@ in {
     enable = true;
     internalInterfaces = ["mqvpn0"];
     externalInterface = vmWanInterface;
-    extraCommands = ''
-      ${pkgs.iptables}/sbin/iptables -t nat -A nixos-nat-post -o ${vmWanInterface} -s 10.10.0.0/24 -j MASQUERADE
-    '';
-    extraStopCommands = ''
-      ${pkgs.iptables}/sbin/iptables -t nat -D nixos-nat-post -o ${vmWanInterface} -s 10.10.0.0/24 -j MASQUERADE 2>/dev/null || true
-    '';
+
   };
 
   services.qemuGuest.enable = true;

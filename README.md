@@ -75,7 +75,7 @@ host
 |-----------|-------|------|
 | LAN (Client↔Router) | `172.16.0.0/12` | Router `172.16.0.1`, Client `172.16.0.2` |
 | WAN (Router↔Server) | `10.200.0.0/24` | Server `10.200.0.1`, Router `10.200.0.2-6` (5 WAN パス) |
-| MQVPN トンネル | `10.10.0.0/24` | Server `10.10.0.1` (server mode), Router `10.10.0.x` (client) |
+| MQVPN トンネル | `192.168.0.0/24` | Server `192.168.0.1` (server mode), Router `192.168.0.x` (client) |
 | 管理 (SLiRP) | `10.0.2.0/24` | 各VM独立のQEMU SLiRP (衝突しない) |
 
 ### NAT 境界 (3段)
@@ -85,7 +85,7 @@ Client がインターネットに出るまで 3 段の NAT が直列に入る:
 ```
 Client (172.16.0.2)
   → [NAT 1: Router] MASQUERADE on mqvpn0
-    → MQVPN tunnel (10.10.0.0/24)
+    → MQVPN tunnel (192.168.0.0/24)
       → [NAT 2: Server] MASQUERADE on eth0 (QEMU user-mode)
         → QEMU user-mode (10.0.2.0/24)
           → [NAT 3: QEMU SLiRP] ホストネットワークへ
@@ -94,7 +94,7 @@ Client (172.16.0.2)
 | # | NAT 元 → 出力先 | 実施場所 | 設定ファイル |
 |---|----------------|----------|-------------|
 | 1 | `172.16.0.0/12` → `mqvpn0` | Router VM | `test/mogami-vm.nix:141-146` |
-| 2 | `10.10.0.0/24` → `eth0` (QEMU user-mode) | Server VM | `test/mogami-server.nix:61-71` |
+| 2 | `192.168.0.0/24` → `eth0` (QEMU user-mode) | Server VM | `test/mogami-server.nix:61-66` |
 | 3 | QEMU user-mode NIC (`10.0.2.x`) → ホストNW | QEMU プロセス (SLiRP) | 各 start スクリプトの `-netdev user` |
 
 - **NAT 1**: ルーターが LAN からのトラフィックを MQVPN トンネルに通す

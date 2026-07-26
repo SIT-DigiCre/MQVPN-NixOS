@@ -11,6 +11,7 @@
   vmLanInterface = "eth1";
   vmWanInterfaces = ["eth2" "eth4" "eth5" "eth6" "eth7"];
   ip = "${pkgs.iproute2}/bin/ip";
+  serverIp = builtins.head (lib.strings.splitString ":" config.services.mqvpn.auth.server_addr);
 in {
   networking.hostName = lib.mkForce "mogami-vm";
 
@@ -99,9 +100,11 @@ in {
     '';
   };
 
-  # LAN → mqvpn0 のルーティング（manage_routes=false のため手動追加）
+  # Split tunnel + LAN → mqvpn0（manage_routes=false のため手動追加）
+  # 0.0.0.0/1 + 128.0.0.0/1 は default より優先されるためルーター自身の通信もトンネル経由になる。
+  # サーバーWAN IP は /32 ピンルートで明示的に WAN 直とする（/1 に吸われないように）。
   systemd.services.mqvpn-post = {
-    description = "MQVPN post-setup: route + NAT for LAN";
+    description = "MQVPN post-setup: split tunnel + LAN routing";
     after = [ "mqvpn.service" ];
     bindsTo = [ "mqvpn.service" ];
     wantedBy = [ "mqvpn.service" ];
@@ -113,6 +116,13 @@ in {
         sleep 1
       done
 
+      # Split tunnel: ルーター自身の全トラフィックもトンネル経由
+      ${ip} route replace 0.0.0.0/1 dev mqvpn0
+      ${ip} route replace 128.0.0.0/1 dev mqvpn0
+
+      # サーバーピンルート: 外側パケットが /1 に吸われないように WAN 直
+      ${ip} route replace ${serverIp}/32 dev eth2
+
       # LAN traffic → mqvpn0 経由
       ${ip} rule add iif ${vmLanInterface} lookup 42 priority 42
       ${ip} route add 172.16.0.0/12 dev mqvpn0 table 42
@@ -121,6 +131,12 @@ in {
     '';
     preStop = ''
       ${ip} rule del priority 42 2>/dev/null || true
+      ${ip} route del 172.16.0.0/12 dev mqvpn0 table 42 2>/dev/null || true
+      ${ip} route del default dev mqvpn0 table 42 2>/dev/null || true
+      ${ip} route del 10.200.0.0/24 dev eth2 table 42 2>/dev/null || true
+      ${ip} route del 0.0.0.0/1 dev mqvpn0 2>/dev/null || true
+      ${ip} route del 128.0.0.0/1 dev mqvpn0 2>/dev/null || true
+      ${ip} route del ${serverIp}/32 dev eth2 2>/dev/null || true
     '';
   };
 
