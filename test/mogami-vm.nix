@@ -6,7 +6,7 @@
 }: let
   # eth0:   build-vm default (IPv4LL/link-local, unused)
   # eth1:   tap tr-mq - LAN (static 172.16.0.1/12)
-  # eth3:   SLiRP mgmt (hostfwd tcp::2223→:22, 10.0.3.0/24)
+  # eth3:   SLiRP mgmt (hostfwd tcp::2223→:22, 10.0.2.0/24)
   # eth2/4-7:  WAN - 5× tap via mqvpn-srv-br0 → server VM (10.200.0.1)
   vmLanInterface = "eth1";
   vmWanInterfaces = ["eth2" "eth4" "eth5" "eth6" "eth7"];
@@ -18,12 +18,8 @@ in {
 
   networking.interfaces.eth0.useDHCP = false;
 
-  # Mgmt (static — SLiRP, SSH port forwarding tcp::2223→:22)
-  networking.interfaces.eth3.useDHCP = false;
-  networking.interfaces.eth3.ipv4.addresses = [{
-    address = "10.0.3.15";
-    prefixLength = 24;
-  }];
+  # Mgmt (DHCP — SLiRP, SSH port forwarding tcp::2223→:22)
+  networking.interfaces.eth3.useDHCP = true;
 
   # LAN (static)
   networking.interfaces."${vmLanInterface}" = {

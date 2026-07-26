@@ -33,7 +33,7 @@ cp mqvpn-auth.json.example mqvpn-auth.json
 # 中身を編集
 ```
 
-`mqvpn-auth.json` が存在しない場合は `server_addr` と `auth_key` は空になり、MQVPN は接続できない。認証情報のみを切り離しているので、NIC 構成などを変更しても再度認証情報を設定する必要はない。
+`mqvpn-auth.json` が存在しない場合、`builtins.readFile` により Nix ビルド時にエラーとなる。認証情報のみを切り離しているので、NIC 構成などを変更しても再度認証情報を設定する必要はない。
 
 ### 構成要素
 
@@ -43,40 +43,6 @@ cp mqvpn-auth.json.example mqvpn-auth.json
 | 全キー（上記含む）のデフォルト値 | `configuration.nix` の `mqvpnConfig` let 内 |
 | `paths` (NIC 一覧) | `services.mqvpn.interfaces` オプション |
 
-
-# Test (mogami-vm)
-
-`test/mogami-vm.nix` により、`configuration.nix` をベースに QEMU/KVM 仮想環境向けに調整したテスト用 VM をビルドできる。
-
-## ビルド
-
-```sh
-nix build path:.#nixosConfigurations.mogami-vm.config.system.build.vm
-```
-
-## ネットワーク構成（mogami-vm）
-
-`build-vm` がデフォルトで旧 `-net` 記法の NIC（`eth0`）を生やす。VM ビルダーが `net.ifnames=0` を強制するためインターフェース名は常に `ethX` になる。
-
-| Interface | 役割 | 方式 |
-|-----------|------|------|
-| `eth0` | build-vm default (unused) | IPv4LL |
-| `eth1` | LAN (tap tr-mq → mqvpn-br0) | 172.16.0.1/12 固定 |
-| `eth2` | WAN0 (tap trw0 → mqvpn-srv-br0) | 10.200.0.2/24 固定 |
-| `eth3` | SSH管理 (hostfwd `:2223`→`:22`) | 10.0.3.15/24 固定 |
-| `eth4` | WAN1 (tap trw1 → mqvpn-srv-br0) | 10.200.0.3/24 固定 |
-| `eth5` | WAN2 (tap trw2 → mqvpn-srv-br0) | 10.200.0.4/24 固定 |
-| `eth6` | WAN3 (tap trw3 → mqvpn-srv-br0) | 10.200.0.5/24 固定 |
-| `eth7` | WAN4 (tap trw4 → mqvpn-srv-br0) | 10.200.0.6/24 固定 |
-
-WAN は 5 本の tap NIC 経由でサーバー VM（`mogami-server` / 10.200.0.1）にマルチパス接続する。
-SSH 管理用 NIC (`eth3`) のみ `hostfwd` を用いる。
-
-### 注意点
-
-- VM ビルダーが `boot.kernelParams` に `net.ifnames=0` を追加するため、`usePredictableInterfaceNames` の設定は実質無効になる。インターフェース名は常に `ethX`。
-- この VM には disko/impermanence の設定は含まれていない（実機向け `mogami` 設定のみ）。
-- WAN の tap NIC (`eth2`, `eth4-7`) はブリッジ `mqvpn-srv-br0` 経由でサーバー VM に接続する。
 
 # Lab (3VM: mogami-vm + mogami-server + mogami-client)
 
@@ -110,9 +76,7 @@ host
 | LAN (Client↔Router) | `172.16.0.0/12` | Router `172.16.0.1`, Client `172.16.0.2` |
 | WAN (Router↔Server) | `10.200.0.0/24` | Server `10.200.0.1`, Router `10.200.0.2-6` (5 WAN パス) |
 | MQVPN トンネル | `10.10.0.0/24` | Server `10.10.0.1` (server mode), Router `10.10.0.x` (client) |
-| Router 管理 (SLiRP) | `10.0.3.0/24` | Router `10.0.3.15` (SSH 2223, HTTP 8080) |
-| Client 管理 (SLiRP) | `10.0.2.0/24` | QEMU デフォルト (SSH 2222) |
-| Server 管理 (SLiRP) | `10.0.2.0/24` | QEMU デフォルト (NAT uplink, SSH 2224) |
+| 管理 (SLiRP) | `10.0.2.0/24` | 各VM独立のQEMU SLiRP (衝突しない) |
 
 ### NAT 境界 (3段)
 
@@ -131,7 +95,7 @@ Client (172.16.0.2)
 |---|----------------|----------|-------------|
 | 1 | `172.16.0.0/12` → `mqvpn0` | Router VM | `test/mogami-vm.nix:141-146` |
 | 2 | `10.10.0.0/24` → `eth0` (QEMU user-mode) | Server VM | `test/mogami-server.nix:61-71` |
-| 3 | QEMU user-mode NIC (`10.0.2.x`, `10.0.3.x`) → ホストNW | QEMU プロセス (SLiRP) | 各 start スクリプトの `-netdev user` |
+| 3 | QEMU user-mode NIC (`10.0.2.x`) → ホストNW | QEMU プロセス (SLiRP) | 各 start スクリプトの `-netdev user` |
 
 - **NAT 1**: ルーターが LAN からのトラフィックを MQVPN トンネルに通す
 - **NAT 2**: サーバーがトンネル復元後のトラフィックを QEMU user-mode NIC 経由で外に出す
@@ -140,6 +104,26 @@ Client (172.16.0.2)
 - **mogami-vm**: ルーター (DHCP/DNS/ファイアウォール/NAT/MQVPNクライアント)
 - **mogami-server**: MQVPN サーバー (トンネル終端, NAT2: tunnel→WAN, `10.200.0.1:443` で待受)
 - **mogami-client**: 下流クライアント（静的IP 172.16.0.2/12, デフォルトGW 172.16.0.1）
+
+### mogami-vm ネットワークインターフェース
+
+`build-vm` がデフォルトで旧 `-net` 記法の NIC（`eth0`）を生やし、`net.ifnames=0` を強制するためインターフェース名は常に `ethX` になる。
+
+| Interface | 役割 | 方式 |
+|-----------|------|------|
+| `eth0` | build-vm default (unused) | IPv4LL |
+| `eth1` | LAN (tap tr-mq → mqvpn-br0) | 172.16.0.1/12 固定 |
+| `eth2` | WAN0 (tap trw0 → mqvpn-srv-br0) | 10.200.0.2/24 固定 |
+| `eth3` | SSH管理 (hostfwd `:2223`→`:22`) | DHCP (10.0.2.0/24) |
+| `eth4` | WAN1 (tap trw1 → mqvpn-srv-br0) | 10.200.0.3/24 固定 |
+| `eth5` | WAN2 (tap trw2 → mqvpn-srv-br0) | 10.200.0.4/24 固定 |
+| `eth6` | WAN3 (tap trw3 → mqvpn-srv-br0) | 10.200.0.5/24 固定 |
+| `eth7` | WAN4 (tap trw4 → mqvpn-srv-br0) | 10.200.0.6/24 固定 |
+
+注意点:
+- VM ビルダーが `boot.kernelParams` に `net.ifnames=0` を追加するため、`usePredictableInterfaceNames` の設定は実質無効になる。
+- この VM には disko/impermanence の設定は含まれていない（実機向け `mogami` 設定のみ）。
+- WAN の tap NIC (`eth2`, `eth4-7`) はブリッジ `mqvpn-srv-br0` 経由でサーバー VM に接続する。
 
 ## 使い方
 
