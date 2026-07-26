@@ -28,7 +28,10 @@ in
   options.services.mqvpn.interfaces = lib.mkOption {
     type = lib.types.listOf lib.types.str;
     default = [
+      "enp12s0f1"
       "enp1s0f0"
+      "enp1s0f1"
+      "enp1s0f2"
       "enp1s0f3"
     ];
     description = "NICs used by MQVPN multi-WAN paths";
@@ -303,7 +306,6 @@ in
           ExecStart = "${mqvpn}/bin/mqvpn --config ${mqvpnConfig}";
           Restart = "always";
           RestartSec = "5s";
-          StateDirectory = "mqvpn";
         };
       };
 
