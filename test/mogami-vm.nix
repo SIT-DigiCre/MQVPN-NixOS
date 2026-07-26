@@ -41,9 +41,6 @@ in {
   networking.interfaces.eth7.useDHCP = false;
   networking.interfaces.eth7.ipv4.addresses = [{ address = "10.200.0.6"; prefixLength = 24; }];
 
-  boot.kernel.sysctl."net.ipv4.conf.all.rp_filter" = 2;
-  networking.firewall.checkReversePath = false;
-
   services.mqvpn.auth = {
     server_addr = "10.200.0.1:443";
     auth_key = "mqvpn-test-key-2024";
@@ -60,12 +57,6 @@ in {
   hardware.firmware = lib.mkForce [];
 
   networking.nat.internalInterfaces = lib.mkForce [vmLanInterface];
-  networking.nat.extraCommands = ''
-    ${pkgs.iptables}/sbin/iptables -t nat -A nixos-nat-post -o mqvpn0 -s 172.16.0.0/12 -j MASQUERADE
-  '';
-  networking.nat.extraStopCommands = ''
-    ${pkgs.iptables}/sbin/iptables -t nat -D nixos-nat-post -o mqvpn0 -s 172.16.0.0/12 -j MASQUERADE 2>/dev/null || true
-  '';
 
   services.kea.dhcp4.settings.interfaces-config.interfaces = lib.mkForce [vmLanInterface];
 

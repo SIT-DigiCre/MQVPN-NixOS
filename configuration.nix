@@ -115,12 +115,27 @@ in
       boot.kernelPackages = pkgs.linuxPackages_latest;
       boot.kernel.sysctl = {
         "net.ipv4.ip_forward" = 1;
+        "net.ipv4.conf.all.rp_filter" = 2;
       };
+      networking.firewall.checkReversePath = false;
       networking.firewall.enable = true;
       networking.nat = {
         enable = true;
         internalInterfaces = [ internalInterfaceName ];
         externalInterface = "mqvpn0";
+        # NAT module (nat-iptables.nix) only generates MASQUERADE in
+        # nixos-nat-post with mark 1 match. Locally generated packets
+        # (router's own traffic via mqvpn0) never go through PREROUTING
+        # so they never get the mark. Without this, they bypass NAT
+        # entirely (relying on server-side NAT at tunnel endpoint).
+        # This restores the traditional POSTROUTING blanket MASQUERADE
+        # for locally generated traffic as defense in depth.
+        extraCommands = ''
+          iptables -t nat -A nixos-nat-out -o mqvpn0 -j MASQUERADE
+        '';
+        extraStopCommands = ''
+          iptables -t nat -D nixos-nat-out -o mqvpn0 -j MASQUERADE 2>/dev/null || true
+        '';
       };
 
       # ---------------------------------------------------------------------
@@ -333,8 +348,6 @@ in
         efi.canTouchEfiVariables = true;
         timeout = lib.mkForce 0;
       };
-      boot.zfs.forceImportRoot = false;
-
       system.stateVersion = "26.05";
     };
 }
