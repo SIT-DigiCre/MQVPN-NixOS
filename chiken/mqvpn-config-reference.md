@@ -39,7 +39,7 @@
 | `reconnect` | bool | `true` | 切断時の自動再接続 | デフォルト推奨 |
 | `reconnect_interval` | int | `5` | 再接続間隔（秒）。バックオフあり | デフォルトでOK |
 | `kill_switch` | bool | `false` | トンネル断時に全通信を遮断（`iptables` で強制） | 必要に応じて |
-| `manage_routes` | bool | `true` | ルーティング自動管理（`setup_routes()` の実行有無） | **マルチWAN時は `false`**（後述） |
+| `manage_routes` | bool | `true` | ルーティング自動管理（`setup_routes()` の実行有無） | 通常は `true` のままでOK |
 | `recv_rate_limit` | u64 | `0` (無制限) | コネクション単位の受信レート制限 (bytes/sec) | 通常は無制限 |
 
 ## サーバー設定
@@ -87,15 +87,16 @@
 ### `manage_routes`
 
 `true`（デフォルト）にすると MQVPN がルーティングテーブルを書き換える:
-- `ip route replace <server>/32 via <発見したGW> dev <発見したIF>` — サーバー経路を1本にピン留め
+- `ip route replace <server>/32 via <発見したGW> dev <発見したIF>` — サーバー経路をピン留め（ゲートウェイがない直接接続時はスキップ）
 - `ip route replace 0.0.0.0/1 dev mqvpn0` — スプリットトンネル
 - `ip route replace 128.0.0.0/1 dev mqvpn0` — スプリットトンネル
 
-**マルチWAN環境では必ず `false` に設定すること。** 理由:
-- サーバー経路が1つのWAN IFにピン留めされる → 他のWAN IFからのパスがFIBエントリ不足でARPブラックホールに吸収される
-- パス回復機構 (`iface_has_route_to_server`) がピン留めされた1本以外の回復を拒否する
+**マルチWANでも `true` のままで問題ない。** 理由:
+- `iface_has_route_to_server()` は `RTA_OIF` で正しく per-IF の FIB エントリを問い合わせる。他のIFにデフォルトルートが存在すれば問題なくパス回復できる。
+- 各パスのソケットは `SO_BINDTODEVICE` されているため、外側パケットは正しいIFから送出される。
+- ピンルート追加によって他IFのFIBエントリが消えることはない。
 
-`false` にした場合は、ルーティングを外部（NixOS networking等）で管理する必要がある。
+`false` にする場合は、ルーティングを外部（NixOS networking等）で管理する必要がある。
 
 ### `init_max_path_id`
 

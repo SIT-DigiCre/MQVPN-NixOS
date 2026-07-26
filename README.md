@@ -93,7 +93,7 @@ Client (172.16.0.2)
 
 | # | NAT 元 → 出力先 | 実施場所 | 設定ファイル |
 |---|----------------|----------|-------------|
-| 1 | `172.16.0.0/12` → `mqvpn0` | Router VM | `test/mogami-vm.nix:141-146` |
+| 1 | `172.16.0.0/12` → `mqvpn0` | Router VM | `test/mogami-vm.nix:62-68` |
 | 2 | `192.168.0.0/24` → `eth0` (QEMU user-mode) | Server VM | `test/mogami-server.nix:61-66` |
 | 3 | QEMU user-mode NIC (`10.0.2.x`) → ホストNW | QEMU プロセス (SLiRP) | 各 start スクリプトの `-netdev user` |
 

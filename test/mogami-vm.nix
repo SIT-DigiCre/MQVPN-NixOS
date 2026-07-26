@@ -10,8 +10,6 @@
   # eth2/4-7:  WAN - 5× tap via mqvpn-srv-br0 → server VM (10.200.0.1)
   vmLanInterface = "eth1";
   vmWanInterfaces = ["eth2" "eth4" "eth5" "eth6" "eth7"];
-  ip = "${pkgs.iproute2}/bin/ip";
-  serverIp = builtins.head (lib.strings.splitString ":" config.services.mqvpn.auth.server_addr);
 in {
   networking.hostName = lib.mkForce "mogami-vm";
 
@@ -46,98 +44,9 @@ in {
   boot.kernel.sysctl."net.ipv4.conf.all.rp_filter" = 2;
   networking.firewall.checkReversePath = false;
 
-  networking.iproute2 = {
-    enable = true;
-    rttablesExtraConfig = ''
-      # WAN 毎のルーティングテーブル（source-based multi-WAN）
-      100 wan0
-      101 wan1
-      102 wan2
-      103 wan3
-      104 wan4
-      # LAN → mqvpn0
-      42 lan
-    '';
-  };
-
   services.mqvpn.auth = {
     server_addr = "10.200.0.1:443";
     auth_key = "mqvpn-test-key-2024";
-  };
-
-  # MQVPN multipath: source-based routing for WAN
-  systemd.services.setup-policy-routing = {
-    description = "Setup policy routing for multi-WAN";
-    after = [ "network-online.target" ];
-    wants = [ "network-online.target" ];
-    wantedBy = [ "multi-user.target" ];
-    serviceConfig = {
-      Type = "oneshot";
-      RemainAfterExit = true;
-    };
-    script = ''
-      ${ip} route add 10.200.0.0/24 dev eth2 src 10.200.0.2 table 100
-      ${ip} route add default via 10.200.0.1 dev eth2 table 100
-      ${ip} rule add from 10.200.0.2 table 100 priority 100
-
-      ${ip} route add 10.200.0.0/24 dev eth4 src 10.200.0.3 table 101
-      ${ip} route add default via 10.200.0.1 dev eth4 table 101
-      ${ip} rule add from 10.200.0.3 table 101 priority 101
-
-      ${ip} route add 10.200.0.0/24 dev eth5 src 10.200.0.4 table 102
-      ${ip} route add default via 10.200.0.1 dev eth5 table 102
-      ${ip} rule add from 10.200.0.4 table 102 priority 102
-
-      ${ip} route add 10.200.0.0/24 dev eth6 src 10.200.0.5 table 103
-      ${ip} route add default via 10.200.0.1 dev eth6 table 103
-      ${ip} rule add from 10.200.0.5 table 103 priority 103
-
-      ${ip} route add 10.200.0.0/24 dev eth7 src 10.200.0.6 table 104
-      ${ip} route add default via 10.200.0.1 dev eth7 table 104
-      ${ip} rule add from 10.200.0.6 table 104 priority 104
-
-      ${ip} route add default via 10.200.0.1 dev eth2
-    '';
-  };
-
-  # Split tunnel + LAN → mqvpn0（manage_routes=false のため手動追加）
-  # 0.0.0.0/1 + 128.0.0.0/1 は default より優先されるためルーター自身の通信もトンネル経由になる。
-  # サーバーWAN IP は /32 ピンルートで明示的に WAN 直とする（/1 に吸われないように）。
-  systemd.services.mqvpn-post = {
-    description = "MQVPN post-setup: split tunnel + LAN routing";
-    after = [ "mqvpn.service" ];
-    bindsTo = [ "mqvpn.service" ];
-    wantedBy = [ "mqvpn.service" ];
-    serviceConfig.Type = "oneshot";
-    serviceConfig.RemainAfterExit = true;
-    script = ''
-      for i in $(seq 1 30); do
-        ${ip} link show mqvpn0 2>/dev/null | grep -q LOWER_UP && break
-        sleep 1
-      done
-
-      # Split tunnel: ルーター自身の全トラフィックもトンネル経由
-      ${ip} route replace 0.0.0.0/1 dev mqvpn0
-      ${ip} route replace 128.0.0.0/1 dev mqvpn0
-
-      # サーバーピンルート: 外側パケットが /1 に吸われないように WAN 直
-      ${ip} route replace ${serverIp}/32 dev eth2
-
-      # LAN traffic → mqvpn0 経由
-      ${ip} rule add iif ${vmLanInterface} lookup 42 priority 42
-      ${ip} route add 172.16.0.0/12 dev mqvpn0 table 42
-      ${ip} route add default dev mqvpn0 table 42
-      ${ip} route add 10.200.0.0/24 dev eth2 table 42
-    '';
-    preStop = ''
-      ${ip} rule del priority 42 2>/dev/null || true
-      ${ip} route del 172.16.0.0/12 dev mqvpn0 table 42 2>/dev/null || true
-      ${ip} route del default dev mqvpn0 table 42 2>/dev/null || true
-      ${ip} route del 10.200.0.0/24 dev eth2 table 42 2>/dev/null || true
-      ${ip} route del 0.0.0.0/1 dev mqvpn0 2>/dev/null || true
-      ${ip} route del 128.0.0.0/1 dev mqvpn0 2>/dev/null || true
-      ${ip} route del ${serverIp}/32 dev eth2 2>/dev/null || true
-    '';
   };
 
   services.qemuGuest.enable = true;
