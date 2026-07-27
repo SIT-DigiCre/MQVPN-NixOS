@@ -52,6 +52,12 @@ in
     description = "MQVPN hybrid TCP lane config";
   };
 
+  options.services.mqvpn.tcpMaxFlows = lib.mkOption {
+    type = lib.types.nullOr lib.types.ints.positive;
+    default = 1024;
+    description = "Max concurrent TCP-lane flows (server-side per-session cap, default 256)";
+  };
+
   config =
     let
       mqvpnAuth = config.services.mqvpn.auth;
@@ -66,14 +72,17 @@ in
               "9.9.9.9"
               "1.1.1.1"
             ];
-            log_level = "debug";
+            log_level = "info";
             kill_switch = false;
             reconnect = true;
             reconnect_interval = 5;
             scheduler = "wlb";
             mtu = 1300;
             manage_routes = true;
-            hybrid = config.services.mqvpn.hybrid;
+            hybrid = config.services.mqvpn.hybrid
+              // (if config.services.mqvpn.tcpMaxFlows != null
+                 then { tcp_max_flows = config.services.mqvpn.tcpMaxFlows; }
+                 else {});
             paths = config.services.mqvpn.interfaces;
           }
           // mqvpnAuth

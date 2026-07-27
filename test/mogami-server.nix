@@ -36,7 +36,7 @@
     hybrid = {
       enabled = true;
       tcp = "auto";
-      egress_allow = [ "0.0.0.0/0" ];
+      tcp_max_flows = 1024;
     };
   });
 in {
