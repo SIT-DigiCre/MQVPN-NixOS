@@ -20,7 +20,7 @@
       mount -t btrfs -o subvolid=5 /dev/disk/by-label/nixos_root /mnt
 
       if [ -e /mnt/root ]; then
-        btrfs subvolume delete /mnt/root
+        btrfs subvolume delete -R /mnt/root
       fi
 
       btrfs subvolume create /mnt/root
