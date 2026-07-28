@@ -129,6 +129,7 @@ in
         "net.ipv4.ip_forward" = 1;
         "net.ipv4.conf.all.rp_filter" = 2;
       };
+      networking.enableIPv6 = false;
       networking.firewall.checkReversePath = false;
       networking.firewall.enable = true;
       networking.nat = {
