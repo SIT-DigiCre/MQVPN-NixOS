@@ -117,7 +117,7 @@ in
 
       # リポジトリ全体をシステムに配置
       systemd.tmpfiles.rules = [
-        "C /etc/nixos 0755 root root - ${./.}"
+        "C /etc/nixos 0755 digicre users - ${./.}"
         "C /home/digicre/mqvpn-router 0755 digicre users - ${./.}"
       ];
 
