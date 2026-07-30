@@ -119,6 +119,8 @@ in
       systemd.tmpfiles.rules = [
         "C /etc/nixos 0755 digicre users - ${./.}"
         "C /home/digicre/mqvpn-router 0755 digicre users - ${./.}"
+        "Z /etc/nixos/.git 0755 digicre users - -"
+        "Z /home/digicre/mqvpn-router/.git 0755 digicre users - -"
       ];
 
       # ---------------------------------------------------------------------
