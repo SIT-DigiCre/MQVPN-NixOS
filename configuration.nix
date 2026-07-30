@@ -138,19 +138,6 @@ in
         enable = true;
         internalInterfaces = [ internalInterfaceName ];
         externalInterface = "mqvpn0";
-        # NAT module (nat-iptables.nix) only generates MASQUERADE in
-        # nixos-nat-post with mark 1 match. Locally generated packets
-        # (router's own traffic via mqvpn0) never go through PREROUTING
-        # so they never get the mark. Without this, they bypass NAT
-        # entirely (relying on server-side NAT at tunnel endpoint).
-        # This restores the traditional POSTROUTING blanket MASQUERADE
-        # for locally generated traffic as defense in depth.
-        extraCommands = ''
-          iptables -t nat -A nixos-nat-out -o mqvpn0 -j MASQUERADE
-        '';
-        extraStopCommands = ''
-          iptables -t nat -D nixos-nat-out -o mqvpn0 -j MASQUERADE 2>/dev/null || true
-        '';
       };
 
       # ---------------------------------------------------------------------
