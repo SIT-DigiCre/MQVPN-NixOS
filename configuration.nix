@@ -68,10 +68,6 @@ in
             mode = "client";
             insecure = true;
             tun_name = "mqvpn0";
-            dns = [
-              "9.9.9.9"
-              "1.1.1.1"
-            ];
             log_level = "info";
             kill_switch = false;
             reconnect = true;
