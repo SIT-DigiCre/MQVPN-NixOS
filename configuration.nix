@@ -46,7 +46,8 @@ in
   options.services.mqvpn.hybrid = lib.mkOption {
     type = lib.types.anything;
     default = {
-      enabled = false;
+      enabled = true;
+      tcp = "auto";
     };
     description = "MQVPN hybrid TCP lane config";
   };
