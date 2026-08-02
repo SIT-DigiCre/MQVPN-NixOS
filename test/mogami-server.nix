@@ -33,6 +33,7 @@
     key_file = "${mqvpnCerts}/key.pem";
     auth_key = mqvpnAuthKey;
     log_level = "debug";
+    reinjection = "deadline";
     hybrid = {
       enabled = true;
       tcp = "auto";
