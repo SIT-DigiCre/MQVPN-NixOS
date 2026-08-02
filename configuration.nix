@@ -54,7 +54,7 @@ in
 
   options.services.mqvpn.tcpMaxFlows = lib.mkOption {
     type = lib.types.nullOr lib.types.ints.positive;
-    default = 1024;
+    default = 2048;
     description = "Max concurrent TCP-lane flows (server-side per-session cap, default 256)";
   };
 
@@ -74,7 +74,6 @@ in
             reconnect_interval = 5;
             scheduler = "wlb";
             reinjection = "deadline";
-            mtu = 1300;
             manage_routes = true;
             hybrid = config.services.mqvpn.hybrid
               // (if config.services.mqvpn.tcpMaxFlows != null

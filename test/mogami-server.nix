@@ -1,5 +1,4 @@
 {
-  config,
   lib,
   pkgs,
   ...
@@ -37,7 +36,7 @@
     hybrid = {
       enabled = true;
       tcp = "auto";
-      tcp_max_flows = 1024;
+      tcp_max_flows = 2048;
     };
   });
 in {
