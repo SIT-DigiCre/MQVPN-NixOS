@@ -1,5 +1,5 @@
 diff --git a/include/libmqvpn.h b/include/libmqvpn.h
-index 27a5747..7af4e0f 100644
+index 4b8443b..120f7af 100644
 --- a/include/libmqvpn.h
 +++ b/include/libmqvpn.h
 @@ -48,7 +48,7 @@ extern "C" {
@@ -12,7 +12,7 @@ index 27a5747..7af4e0f 100644
  
  /* ─── Opaque handles ─── */
 diff --git a/src/config.h b/src/config.h
-index d198751..e3da2d6 100644
+index 6394f3e..8a2ca36 100644
 --- a/src/config.h
 +++ b/src/config.h
 @@ -18,7 +18,7 @@
@@ -24,8 +24,25 @@ index d198751..e3da2d6 100644
  #define MQVPN_CONFIG_MAX_DNS   4
  #define MQVPN_CONFIG_MAX_USERS 64
  _Static_assert(MQVPN_CONFIG_MAX_PATHS == MQVPN_MAX_PATHS,
+diff --git a/src/platform/linux/control_socket.h b/src/platform/linux/control_socket.h
+index 893d3a8..b8ffe20 100644
+--- a/src/platform/linux/control_socket.h
++++ b/src/platform/linux/control_socket.h
+@@ -27,10 +27,10 @@
+ struct event_base;
+ 
+ /* Maximum response size. Worst-case get_status with MQVPN_MAX_USERS=64 and
+- * MQVPN_MAX_PATHS=8 produces ~210 KB; round up to 256 KB. The exact bound is
++ * MQVPN_MAX_PATHS=16 produces ~434 KB; round up to 512 KB. The exact bound is
+  * verified by tests/test_control_response_bound.c — bump it if either limit
+  * grows. */
+-#define CTRL_MAX_RESP_BYTES (256 * 1024)
++#define CTRL_MAX_RESP_BYTES (512 * 1024)
+ 
+ typedef struct ctrl_socket_s ctrl_socket_t;
+ 
 diff --git a/src/vpn_client.h b/src/vpn_client.h
-index 668ba71..7d87b94 100644
+index 0c30a7c..bbfd83f 100644
 --- a/src/vpn_client.h
 +++ b/src/vpn_client.h
 @@ -10,7 +10,7 @@
