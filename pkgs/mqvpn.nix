@@ -2,11 +2,11 @@
 
 stdenv.mkDerivation rec {
   pname = "mqvpn-binary";
-  version = "0.15.0";
+  version = "0.16.0";
 
   src = fetchurl {
     url = "https://github.com/mp0rta/mqvpn/releases/download/v${version}/mqvpn_${version}_amd64.tar.gz";
-    sha256 = "sha256-/Qvv4Vzpmnf3W+GJIyUwpE0ZszPF2T6CAC9EdLovHI8=";
+    sha256 = "sha256-PN+x3JxJKoQX/gq9Hvzan9V/43u6Du+NbuGHHiIzKik=";
   };
 
   nativeBuildInputs = [ autoPatchelfHook ];
