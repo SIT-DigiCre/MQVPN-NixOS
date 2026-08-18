@@ -10,4 +10,4 @@ echo "  Boot logs will appear below."
 echo "  Ctrl+C to stop."
 echo ""
 
-exec "$CLIENT_VM"
+exec "$CLIENT_VM" -smp 4

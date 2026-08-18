@@ -11,7 +11,7 @@
   mqvpnAuthKey = "mqvpn-test-key-2024";
   localIp = "10.200.0.1";
 
-  mqvpn = pkgs.callPackage ../pkgs/mqvpn.nix { };
+  mqvpn = pkgs.callPackage ../pkgs/mqvpn-src.nix { };
 
   mqvpnCerts = pkgs.runCommand "mqvpn-certs" {
     nativeBuildInputs = [pkgs.openssl];
@@ -37,6 +37,10 @@
       enabled = true;
       tcp = "auto";
       tcp_max_flows = 2048;
+      # ラボ専用: 帯域テストの TCP レーン宛先に slirp GW の 10.0.2.2
+      # (常にホストの loopback へ届く固定アドレス)を使うため。
+      # egress ACL がデフォルトで RFC1918 宛を拒否するので明示許可する
+      egress_allow = [ "10.0.2.0/24" ];
     };
   });
 in {
