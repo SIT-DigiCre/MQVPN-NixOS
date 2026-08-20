@@ -8,12 +8,22 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     impermanence.url = "github:nix-community/impermanence";
+
+    nix-index-database = {
+      url = "github:nix-community/nix-index-database";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
-    { self, nixpkgs, disko, impermanence, ... }:
+    { self, nixpkgs, disko, impermanence, nix-index-database, ... }:
     let
       inherit (nixpkgs) lib;
+
+      commonModules = [
+        nix-index-database.nixosModules.nix-index
+        { programs.nix-index-database.comma.enable = true; }
+      ];
     in
     {
       formatter.x86_64-linux = nixpkgs.legacyPackages.x86_64-linux.nixpkgs-fmt;
@@ -53,7 +63,7 @@
 
               console.keyMap = "jp106";
             }
-          ];
+          ] ++ commonModules;
         };
         mogami = nixpkgs.lib.nixosSystem {
           system = "x86_64-linux";
@@ -63,20 +73,20 @@
             impermanence.nixosModules.impermanence
             ./persistence.nix
             ./configuration.nix
-          ];
+          ] ++ commonModules;
         };
         mogami-vm = nixpkgs.lib.nixosSystem {
           system = "x86_64-linux";
           modules = [
             ./configuration.nix
             ./test/mogami-vm.nix
-          ];
+          ] ++ commonModules;
         };
         mogami-client = nixpkgs.lib.nixosSystem {
           system = "x86_64-linux";
           modules = [
             ./test/mogami-client.nix
-          ];
+          ] ++ commonModules;
         };
         mogami-server = nixpkgs.lib.nixosSystem {
           system = "x86_64-linux";
@@ -92,7 +102,7 @@
                 ];
               };
             }
-          ];
+          ] ++ commonModules;
         };
       };
     };
