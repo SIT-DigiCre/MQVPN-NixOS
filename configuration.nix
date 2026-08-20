@@ -33,7 +33,8 @@ in
       "enp1s0f2"
       "enp1s0f3"
       "enp6s0"
-      "enp7s0"
+      "enp8s0"
+      "enp9s0"
     ];
     description = "NICs used by MQVPN multi-WAN paths";
   };
