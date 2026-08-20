@@ -73,6 +73,7 @@ in
             reconnect = true;
             reconnect_interval = 5;
             scheduler = "wlb";
+            cc = "bbr";
             reinjection = "deadline";
             manage_routes = true;
             hybrid =
