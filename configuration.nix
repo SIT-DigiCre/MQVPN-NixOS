@@ -311,6 +311,7 @@ in
         cfspeedtest
         ethtool
         iperf3
+        firefox
       ];
 
       # ---------------------------------------------------------------------
@@ -320,25 +321,28 @@ in
       time.timeZone = "Asia/Tokyo";
       console.keyMap = "jp106";
 
-      # i18n.defaultLocale = "ja_JP.UTF-8";
-      # fonts = {
-      #   fontconfig.enable = true;
-      #   packages = [
-      #     pkgs.noto-fonts-cjk-sans
-      #   ];
-      # };
-      # hardware.graphics.enable = true;
-      # services.kmscon = {
-      #   enable = true;
-      #   # hwRender = true;
-      #   config = {
-      #     font-name = "Noto Sans Mono CJK JP";
-      #     font-size = 14;
-      #   };
-      # };
+      i18n.defaultLocale = "ja_JP.UTF-8";
+      fonts = {
+        fontconfig.enable = true;
+        packages = with pkgs; [
+          noto-fonts-cjk-sans
+          noto-fonts-color-emoji
+        ];
+      };
+      hardware.graphics.enable = true;
 
       # ---------------------------------------------------------------------
-      # 11. ブートローダー・システム状態バージョン
+      # 11. GUI (GNOME)
+      # ---------------------------------------------------------------------
+
+      services.xserver.enable = true;
+      services.displayManager.gdm.enable = true;
+      services.desktopManager.gnome.enable = true;
+      services.gnome.core-apps.enable = true;
+      services.xserver.xkb.layout = "jp";
+
+      # ---------------------------------------------------------------------
+      # 12. ブートローダー・システム状態バージョン
       # ---------------------------------------------------------------------
       boot.loader = {
         systemd-boot.enable = true;
