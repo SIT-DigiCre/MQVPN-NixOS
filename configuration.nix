@@ -75,10 +75,14 @@ in
             scheduler = "wlb";
             reinjection = "deadline";
             manage_routes = true;
-            hybrid = config.services.mqvpn.hybrid
-              // (if config.services.mqvpn.tcpMaxFlows != null
-                 then { tcp_max_flows = config.services.mqvpn.tcpMaxFlows; }
-                 else {});
+            hybrid =
+              config.services.mqvpn.hybrid
+              // (
+                if config.services.mqvpn.tcpMaxFlows != null then
+                  { tcp_max_flows = config.services.mqvpn.tcpMaxFlows; }
+                else
+                  { }
+              );
             paths = config.services.mqvpn.interfaces;
           }
           // mqvpnAuth
@@ -86,6 +90,9 @@ in
       );
     in
     {
+      boot.kernelParams = [
+        "ipv6.disable=1"
+      ];
       hardware.enableRedistributableFirmware = true;
       hardware.firmware = [ rtl8127-firmware ];
       nix.settings.experimental-features = [
