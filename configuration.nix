@@ -30,7 +30,7 @@ in
     default = [
       # "enp12s0f1"
       "enp1s0f0"
-      # "enp1s0f1"
+      "enp1s0f1"
       "enp1s0f2"
       "enp1s0f3"
     ];
