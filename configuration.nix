@@ -20,7 +20,7 @@ let
     '';
   };
 
-  internalInterfaceName = "enp6s0";
+  internalInterfaceName = "enp10s0";
   localIp = "172.16.0.1";
 
 in
