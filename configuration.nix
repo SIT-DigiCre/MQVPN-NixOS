@@ -128,6 +128,9 @@ in
         "net.ipv4.conf.all.rp_filter" = 2;
       };
       networking.enableIPv6 = false;
+      networking.dhcpcd.extraConfig = ''
+        noipv6
+      '';
       networking.firewall.checkReversePath = false;
       networking.firewall.enable = true;
       networking.nat = {
