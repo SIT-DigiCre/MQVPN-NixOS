@@ -31,7 +31,7 @@
     cert_file = "${mqvpnCerts}/cert.pem";
     key_file = "${mqvpnCerts}/key.pem";
     auth_key = mqvpnAuthKey;
-    log_level = "debug";
+    log_level = "info";
     reinjection = "deadline";
     hybrid = {
       enabled = true;
