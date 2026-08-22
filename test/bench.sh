@@ -125,7 +125,7 @@ CMDRUN="latency|hetero|multistream|profile|clean"
 case "$CMD" in
   clean)
     clear_netem
-    ssh_srv 'sudo -n pkill -x mqvpn 2>/dev/null; sudo -n systemctl start mqvpn-server 2>/dev/null; sleep 3; echo restored' 2>/dev/null | tail -1
+    ssh_srv 'pgrep -x mqvpn >/dev/null && echo running || { sudo -n systemctl start mqvpn-server; sleep 3; echo restarted; }' 2>/dev/null | tail -1
     ;;
   latency)
     MS="${1:-50}"; RATE="${2:-800}"; SEC="${3:-15}"; DIR="${4:-down}"
