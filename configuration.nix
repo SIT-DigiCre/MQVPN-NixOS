@@ -76,7 +76,7 @@ in
             reconnect_interval = 5;
             scheduler = "wlb";
             cc = "bbr";
-            reinjection = "deadline";
+            reinjection = "off";
             manage_routes = true;
             hybrid =
               config.services.mqvpn.hybrid

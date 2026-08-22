@@ -32,7 +32,7 @@
     key_file = "${mqvpnCerts}/key.pem";
     auth_key = mqvpnAuthKey;
     log_level = "info";
-    reinjection = "deadline";
+    reinjection = "off";
     hybrid = {
       enabled = true;
       tcp = "auto";
