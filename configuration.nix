@@ -7,6 +7,8 @@
 let
   mqvpn = pkgs.callPackage ./pkgs/mqvpn-dbg.nix { };
 
+  live-chart = pkgs.callPackage ./pkgs/live-chart.nix { };
+
   rtl8127-firmware = pkgs.stdenv.mkDerivation {
     name = "rtl8127-firmware";
     src = pkgs.fetchurl {
@@ -267,6 +269,11 @@ in
         ];
       };
 
+      # 全WAN NICをまとめて監視するエイリアス
+      programs.bash.shellAliases = {
+        live-chart = "live_chart -i '${lib.concatStringsSep "," config.services.mqvpn.interfaces}'";
+      };
+
       # ---------------------------------------------------------------------
       # 6. sudo（wheelはパスワード不要）
       # ---------------------------------------------------------------------
@@ -324,6 +331,7 @@ in
         cfspeedtest
         ethtool
         iperf3
+        live-chart
       ];
 
       # ---------------------------------------------------------------------
