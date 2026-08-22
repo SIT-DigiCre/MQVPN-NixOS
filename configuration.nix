@@ -5,7 +5,7 @@
   ...
 }:
 let
-  mqvpn = pkgs.callPackage ./pkgs/mqvpn-src.nix { };
+  mqvpn = pkgs.callPackage ./pkgs/mqvpn-dbg.nix { };
 
   rtl8127-firmware = pkgs.stdenv.mkDerivation {
     name = "rtl8127-firmware";

@@ -14,7 +14,7 @@ in stdenv.mkDerivation {
     hash = "sha256-W96uDbXUBQKIZDStUEwMtaphME21SA7WaJCRFR/lgWk=";
   };
 
-  patches = [ ../patches/mqvpn-max-paths.patch ];
+  patches = [ ../patches/mqvpn-max-paths.patch ../patches/xquic-reinjection-scan.patch ];
 
   dontUseCmakeConfigure = true;
   nativeBuildInputs = with pkgs; [ cmake makeWrapper autoPatchelfHook git ];
