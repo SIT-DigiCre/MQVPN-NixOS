@@ -1,0 +1,59 @@
+diff --git a/p1/third_party/xquic/src/transport/xqc_conn.h b/third_party/xquic/src/transport/xqc_conn.h
+index a44f191..1f7efb5 100644
+--- a/third_party/xquic/src/transport/xqc_conn.h
++++ b/third_party/xquic/src/transport/xqc_conn.h
+@@ -368,6 +368,12 @@ struct xqc_connection_s {
+     uint64_t reinj_scan_generation;
+     xqc_bool_t reinj_sent_this_tick;
+ 
++    /* per-mode monotonic us of the last reinjection scan pass (throttle for
++     * the O(unacked) walk; 0 = never scanned yet) */
++    xqc_usec_t reinj_last_before_sched_us;
++    xqc_usec_t reinj_last_after_sched_us;
++    xqc_usec_t reinj_last_after_send_us;
++
+     /* callback function and user_data to application layer */
+     xqc_transport_callbacks_t transport_cbs;
+     void *user_data; /* user_data for application layer */
+diff --git a/p1/third_party/xquic/src/transport/xqc_reinjection.c b/third_party/xquic/src/transport/xqc_reinjection.c
+index 4801bd8..bbf6502 100644
+--- a/third_party/xquic/src/transport/xqc_reinjection.c
++++ b/third_party/xquic/src/transport/xqc_reinjection.c
+@@ -22,6 +22,13 @@
+ 
+ #include "xquic/xqc_errno.h"
+ 
++/* max frequency of unacked-list reinjection scans per mode. Under sustained
++ * load the list is walked up to twice per engine tick; most of it is
++ * packets already marked as reinjected, so scanning more often than this
++ * only burns CPU. Delay added to speculative reinjection is bounded by this
++ * interval. */
++#define XQC_REINJ_SCAN_INTERVAL_US (2000u)
++
+ void
+ xqc_associate_packet_with_reinjection(xqc_packet_out_t *reinj_origin,
+     xqc_packet_out_t *reinj_replica)
+@@ -124,6 +131,23 @@ xqc_conn_reinject_unack_packets(xqc_connection_t *conn, xqc_reinjection_mode_t m
+         return;
+     }
+ 
++    /* rate limit: under sustained load every tick would otherwise walk the
++     * whole unacked list (mostly already-reinjected packets) up to twice.
++     * At most one scan per mode per interval bounds reinjection delay to
++     * the interval, which is far below the deadline/lower-bound itself. */
++    xqc_usec_t now = xqc_monotonic_timestamp();
++    xqc_usec_t *last_scan_us;
++    switch (mode) {
++    case XQC_REINJ_UNACK_BEFORE_SCHED: last_scan_us = &conn->reinj_last_before_sched_us; break;
++    case XQC_REINJ_UNACK_AFTER_SCHED:  last_scan_us = &conn->reinj_last_after_sched_us;  break;
++    case XQC_REINJ_UNACK_AFTER_SEND:   last_scan_us = &conn->reinj_last_after_send_us;   break;
++    default: return;
++    }
++    if (now - *last_scan_us < XQC_REINJ_SCAN_INTERVAL_US) {
++        return;
++    }
++    *last_scan_us = now;
++
+     /* bump the scan generation so reinj ctl callbacks can cache per-scan
+      * invariants (deadline, path classes, age watermark) safely */
+     conn->reinj_scan_generation++;

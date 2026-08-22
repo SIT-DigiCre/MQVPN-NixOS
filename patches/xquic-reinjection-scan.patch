@@ -1,0 +1,256 @@
+diff --git a/third_party/xquic/src/transport/reinjection_control/xqc_reinj_deadline.c b/third_party/xquic/src/transport/reinjection_control/xqc_reinj_deadline.c
+index 7703cd1..afa9020 100644
+--- a/third_party/xquic/src/transport/reinjection_control/xqc_reinj_deadline.c
++++ b/third_party/xquic/src/transport/reinjection_control/xqc_reinj_deadline.c
+@@ -64,16 +64,16 @@ xqc_deadline_reinj_check_packet(xqc_packet_out_t *po)
+     return XQC_FALSE;
+ }
+ 
+-static xqc_bool_t
+-xqc_deadline_reinj_can_reinject_before_sched(xqc_deadline_reinj_ctl_t *rctl, 
+-    xqc_packet_out_t *po)
++static void
++xqc_deadline_reinj_refresh(xqc_deadline_reinj_ctl_t *rctl)
+ {
+-    if (!xqc_deadline_reinj_check_packet(po)) {
+-        return XQC_FALSE;
++    xqc_usec_t now = xqc_monotonic_timestamp();
++    xqc_usec_t epoch_ms = now / 1000;
++    if (rctl->cache_epoch_ms == epoch_ms && epoch_ms != 0) {
++        return;
+     }
+ 
+     xqc_connection_t *conn = rctl->conn;
+-    xqc_usec_t now = xqc_monotonic_timestamp();
+     xqc_usec_t min_srtt = xqc_conn_get_min_srtt(conn, 0);
+ 
+     double   factor      = conn->conn_settings.reinj_flexible_deadline_srtt_factor;
+@@ -82,17 +82,46 @@ xqc_deadline_reinj_can_reinject_before_sched(xqc_deadline_reinj_ctl_t *rctl,
+     uint64_t lower_bound = conn->conn_settings.reinj_deadline_lower_bound;
+     double   deadline    = xqc_max(xqc_min(flexible, (double)hard), (double)lower_bound);
+ 
+-    xqc_log(conn->log, XQC_LOG_DEBUG, 
+-            "|deadline:%f|factor:%.4f|min_srtt:%ui|flexible:%f|hard:%ui|"
+-            "lower_bound:%ui|now:%ui|sent_time:%ui|frame:%s|",
+-            deadline, factor, min_srtt, flexible, hard, 
+-            lower_bound, now, po->po_sent_time, 
+-            xqc_frame_type_2_str(conn->engine, po->po_frame_types));
++    rctl->cache_epoch_ms = epoch_ms;
++    rctl->cache_now_us = now;
++    rctl->cache_deadline = deadline;
++}
+ 
+-    if ((double)(now - po->po_sent_time) >= deadline) {   
++static xqc_bool_t
++xqc_deadline_reinj_can_reinject_before_sched(xqc_deadline_reinj_ctl_t *rctl, 
++    xqc_packet_out_t *po)
++{
++    if (!xqc_deadline_reinj_check_packet(po)) {
++        return XQC_FALSE;
++    }
++
++    xqc_connection_t *conn = rctl->conn;
++
++    /* age watermark: the unacked list is walked oldest-first, so once a
++     * packet younger than the deadline appears, every later packet is
++     * younger too and cannot qualify for this scan pass */
++    if (rctl->scan_gen != conn->reinj_scan_generation) {
++        rctl->scan_gen = conn->reinj_scan_generation;
++        rctl->scan_seen_young = XQC_FALSE;
++    }
++    if (rctl->scan_seen_young) {
++        return XQC_FALSE;
++    }
++
++    xqc_deadline_reinj_refresh(rctl);
++
++    if ((double)(rctl->cache_now_us - po->po_sent_time) >= rctl->cache_deadline) {
++        xqc_log(conn->log, XQC_LOG_DEBUG, 
++                "|deadline:%f|factor:%.4f|min_srtt:%ui|now:%ui|sent_time:%ui|frame:%s|",
++                rctl->cache_deadline,
++                conn->conn_settings.reinj_flexible_deadline_srtt_factor,
++                xqc_conn_get_min_srtt(conn, 0),
++                rctl->cache_now_us, po->po_sent_time,
++                xqc_frame_type_2_str(conn->engine, po->po_frame_types));
+         return XQC_TRUE;
+     }
+ 
++    rctl->scan_seen_young = XQC_TRUE;
+     return XQC_FALSE;
+ }
+ 
+@@ -106,19 +135,30 @@ xqc_deadline_reinj_can_reinject_after_send(xqc_deadline_reinj_ctl_t *rctl,
+     }
+ 
+     xqc_connection_t *conn = rctl->conn;
+-    xqc_path_ctx_t *path = NULL;
+-    xqc_path_perf_class_t path_class;
+ 
+-    path = xqc_conn_find_path_by_path_id(conn, po->po_path_id);
+-    
+-    if (path) {
+-        path_class = xqc_path_get_perf_class(path);
+-        if (path_class == XQC_PATH_CLASS_STANDBY_LOW 
+-            || path_class == XQC_PATH_CLASS_AVAILABLE_LOW)
+-        {
+-            return XQC_TRUE;
++    /* per-scan single-entry path-class cache: consecutive packets (burst
++     * sends) usually share the origin path, so avoid re-walking the path
++     * list once per packet */
++    if (rctl->scan_gen != conn->reinj_scan_generation) {
++        rctl->scan_gen = conn->reinj_scan_generation;
++        rctl->after_send_cache_valid = XQC_FALSE;
++    }
++    if (!rctl->after_send_cache_valid || rctl->after_send_cache_pid != po->po_path_id) {
++        xqc_path_ctx_t *path = xqc_conn_find_path_by_path_id(conn, po->po_path_id);
++        rctl->after_send_cache_valid = XQC_TRUE;
++        rctl->after_send_cache_pid = po->po_path_id;
++        if (path) {
++            rctl->after_send_cache_class = xqc_path_get_perf_class(path);
++        } else {
++            rctl->after_send_cache_class = XQC_PATH_CLASS_AVAILABLE_HIGH;
+         }
+     }
++
++    if (rctl->after_send_cache_class == XQC_PATH_CLASS_STANDBY_LOW 
++        || rctl->after_send_cache_class == XQC_PATH_CLASS_AVAILABLE_LOW)
++    {
++        return XQC_TRUE;
++    }
+     
+     return XQC_FALSE;
+ }
+diff --git a/third_party/xquic/src/transport/reinjection_control/xqc_reinj_deadline.h b/third_party/xquic/src/transport/reinjection_control/xqc_reinj_deadline.h
+index 3b1a8e9..b73d066 100644
+--- a/third_party/xquic/src/transport/reinjection_control/xqc_reinj_deadline.h
++++ b/third_party/xquic/src/transport/reinjection_control/xqc_reinj_deadline.h
+@@ -11,6 +11,21 @@
+ typedef struct {
+     xqc_log_t              *log;
+     xqc_connection_t       *conn;
++
++    /* per-scan caches (patched for perf). The unacked list is walked
++     * oldest-first, so the first packet younger than the computed deadline
++     * marks the watermark past which no packet can qualify in this scan
++     * (scan_gen / scan_seen_young). min_srtt and the derived deadline are
++     * loop invariants, cached per millisecond (cache_epoch_ms ...). Path
++     * class lookups for AFTER_SEND are cached one entry at a time. */
++    uint64_t    scan_gen;            /* last reinj_scan_generation seen */
++    xqc_bool_t  scan_seen_young;     /* age watermark armed for scan_gen */
++    xqc_usec_t  cache_epoch_ms;      /* monotonic ms when cache filled */
++    xqc_usec_t  cache_now_us;        /* monotonic us at cache fill */
++    double      cache_deadline;      /* deadline derived from min_srtt */
++    uint64_t    after_send_cache_pid;      /* last path id class-cached */
++    int         after_send_cache_class;    /* its perf class */
++    xqc_bool_t  after_send_cache_valid;
+ } xqc_deadline_reinj_ctl_t;
+ 
+ extern const xqc_reinj_ctl_callback_t xqc_deadline_reinj_ctl_cb;
+diff --git a/third_party/xquic/src/transport/xqc_conn.c b/third_party/xquic/src/transport/xqc_conn.c
+index 055332b..26dce79 100644
+--- a/third_party/xquic/src/transport/xqc_conn.c
++++ b/third_party/xquic/src/transport/xqc_conn.c
+@@ -2341,6 +2341,7 @@ xqc_on_packets_send_burst(xqc_connection_t *conn, xqc_path_ctx_t *path, ssize_t
+                     packet_out,
+                     &send_queue->sndq_unacked_packets[packet_out->po_pkt.pkt_pns],
+                     send_queue);
++                conn->reinj_sent_this_tick = 1;
+ 
+             } else {
+                 xqc_send_queue_insert_free(packet_out, &send_queue->sndq_free_packets,
+@@ -2626,6 +2627,7 @@ xqc_path_send_packets(xqc_connection_t *conn, xqc_path_ctx_t *path, xqc_list_hea
+             xqc_send_queue_insert_unacked(
+                 packet_out, &send_queue->sndq_unacked_packets[packet_out->po_pkt.pkt_pns],
+                 send_queue);
++            conn->reinj_sent_this_tick = 1;
+ 
+         } else {
+             xqc_send_queue_insert_free(packet_out, &send_queue->sndq_free_packets,
+diff --git a/third_party/xquic/src/transport/xqc_conn.h b/third_party/xquic/src/transport/xqc_conn.h
+index 81c69fe..a44f191 100644
+--- a/third_party/xquic/src/transport/xqc_conn.h
++++ b/third_party/xquic/src/transport/xqc_conn.h
+@@ -359,6 +359,15 @@ struct xqc_connection_s {
+     xqc_conn_flag_t conn_flag;
+     xqc_conn_type_t conn_type;
+ 
++    /* reinjection scan bookkeeping (patched for perf): reinj_scan_generation
++     * is bumped once per xqc_conn_reinject_unack_packets() pass so reinj
++     * ctl callbacks can cheaply cache per-scan invariants; reinj_sent_this_tick
++     * marks ticks whose send phase actually moved packets into the unacked
++     * list (cleared at the top of xqc_engine_process_conn), letting the
++     * engine skip the AFTER_SEND reinjection scan on idle ticks. */
++    uint64_t reinj_scan_generation;
++    xqc_bool_t reinj_sent_this_tick;
++
+     /* callback function and user_data to application layer */
+     xqc_transport_callbacks_t transport_cbs;
+     void *user_data; /* user_data for application layer */
+diff --git a/third_party/xquic/src/transport/xqc_engine.c b/third_party/xquic/src/transport/xqc_engine.c
+index 02ca9b5..802d749 100644
+--- a/third_party/xquic/src/transport/xqc_engine.c
++++ b/third_party/xquic/src/transport/xqc_engine.c
+@@ -698,6 +698,10 @@ xqc_engine_send_reset(xqc_engine_t *engine, xqc_cid_t *dcid,
+ void
+ xqc_engine_process_conn(xqc_connection_t *conn, xqc_usec_t now)
+ {
++    /* reset per-tick reinjection send marker; set again by the send phase
++     * if any ack-eliciting packet moves into the unacked list this tick */
++    conn->reinj_sent_this_tick = 0;
++
+     xqc_log(conn->log, XQC_LOG_DEBUG, "|conn:%p|state:%s|flag:%s|now:%ui|",
+             conn, xqc_conn_state_2_str(conn->conn_state), xqc_conn_flag_2_str(conn, conn->conn_flag), now);
+ 
+@@ -891,7 +895,8 @@ xqc_engine_conn_logic(xqc_engine_t *engine, xqc_connection_t *conn)
+             xqc_conn_send_packets(conn);
+         }
+ 
+-        if (conn->conn_settings.mp_enable_reinjection & XQC_REINJ_UNACK_AFTER_SEND) {
++        if ((conn->conn_settings.mp_enable_reinjection & XQC_REINJ_UNACK_AFTER_SEND)
++            && conn->reinj_sent_this_tick) {
+             xqc_conn_reinject_unack_packets(conn, XQC_REINJ_UNACK_AFTER_SEND);
+             xqc_conn_send_packets(conn);
+         }
+@@ -992,7 +997,8 @@ xqc_engine_main_logic(xqc_engine_t *engine)
+                 xqc_conn_send_packets(conn);
+             }
+ 
+-            if (conn->conn_settings.mp_enable_reinjection & XQC_REINJ_UNACK_AFTER_SEND) {
++            if ((conn->conn_settings.mp_enable_reinjection & XQC_REINJ_UNACK_AFTER_SEND)
++                && conn->reinj_sent_this_tick) {
+                 xqc_conn_reinject_unack_packets(conn, XQC_REINJ_UNACK_AFTER_SEND);
+                 xqc_conn_send_packets(conn);
+             }
+diff --git a/third_party/xquic/src/transport/xqc_reinjection.c b/third_party/xquic/src/transport/xqc_reinjection.c
+index 178c3d1..4801bd8 100644
+--- a/third_party/xquic/src/transport/xqc_reinjection.c
++++ b/third_party/xquic/src/transport/xqc_reinjection.c
+@@ -119,6 +119,15 @@ xqc_conn_reinject_unack_packets(xqc_connection_t *conn, xqc_reinjection_mode_t m
+     xqc_list_head_t *pos, *next;
+     xqc_packet_out_t *packet_out;
+ 
++    /* fast path: nothing in flight, nothing to scan */
++    if (xqc_list_empty(&conn->conn_send_queue->sndq_unacked_packets[XQC_PNS_APP_DATA])) {
++        return;
++    }
++
++    /* bump the scan generation so reinj ctl callbacks can cache per-scan
++     * invariants (deadline, path classes, age watermark) safely */
++    conn->reinj_scan_generation++;
++
+     xqc_list_for_each_safe(pos, next, &conn->conn_send_queue->sndq_unacked_packets[XQC_PNS_APP_DATA]) {
+         packet_out = xqc_list_entry(pos, xqc_packet_out_t, po_list);
+         if (conn->reinj_callback
+@@ -142,7 +151,9 @@ xqc_conn_reinject_unack_packets(xqc_connection_t *conn, xqc_reinjection_mode_t m
+     xqc_path_ctx_t *path;
+     xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
+         path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
+-        xqc_list_splice_tail_init(&path->path_reinj_tmp_buf,
+-                                  &path->path_schedule_buf[XQC_SEND_TYPE_NORMAL]);
++        if (!xqc_list_empty(&path->path_reinj_tmp_buf)) {
++            xqc_list_splice_tail_init(&path->path_reinj_tmp_buf,
++                                      &path->path_schedule_buf[XQC_SEND_TYPE_NORMAL]);
++        }
+     }
+ }
+\ No newline at end of file
