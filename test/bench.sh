@@ -159,7 +159,8 @@ case "$CMD" in
     MS="${1:-50}"; RATE="${2:-800}"; SEC="${3:-15}"; DIR="${4:-down}"
     ensure_iperfd; ship_common; clear_netem; apply_uniform "$MS"
     sleep 8
-    PERF=$(ssh_srv "nix --extra-experimental-features 'nix-command flakes' shell nixpkgs#linuxPackages_latest.perf -c bash -c 'command -v perf' 2>/dev/null | tail -1")
+    PERF=$(ssh_srv "command -v perf 2>/dev/null | tail -1")
+    [ -n "$PERF" ] || PERF=$(ssh_srv "nix --extra-experimental-features 'nix-command flakes' shell nixpkgs#linuxPackages_latest.perf -c bash -c 'command -v perf' 2>/dev/null | tail -1")
     [ -n "$PERF" ] || { echo "perf not found on server"; exit 1; }
     PERFDATA=/tmp/perf.data
     ssh_srv "rm -f ${PERFDATA}; sudo -n bash -c 'nohup ${PERF} record -F 99 -e cpu-clock -g -p \$(pgrep -x mqvpn) -o ${PERFDATA} -- sleep $((SEC + 4)) >/tmp/perf-record.log 2>&1 &'" >/dev/null 2>&1
