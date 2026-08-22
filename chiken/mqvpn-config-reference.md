@@ -15,7 +15,7 @@
 | `init_max_path_id` | u64 | `0` (= xquic default 8) | クライアントが作成可能な最大パスID。0=デフォルト(8) → 9パスまで | デフォルトのままでOK |
 | `tun_mtu` | int | `0` (= 自動: クライアントはネゴシエーション, サーバーは1382) | TUN の MTU | デフォルト推奨。SLiRP環境では `1200` に下げる |
 | `reorder` | object | (無効) | フロー再整列 (§16 reorder shim)。`enabled: true` で有効化 | 通常は無効でOK |
-| `hybrid` | object | (無効) | Hybrid mode（後述） | 有効推奨（`enabled: true`） |
+| `hybrid` | object | (無効) | Hybrid mode（後述） | 通常は無効でOK（実測で有効時にスループットが低下） |
 
 ## スケジューラ一覧
 
@@ -75,12 +75,12 @@
 | `tcp` | `"stream"` | TCP レーン常時有効（≥2パス不要） |
 | `tcp` | `"raw"` | TCP レーン不使用（純粋な datagram のみ） |
 | `tcp` | `"auto"` | 2パス以上アクティブになった時点でTCPレーン開始 |
-| `tcp_max_flows` | int | クライアントあたりの最大TCPレーン同時フロー数（デフォルト256） |
+| `tcp_max_flows` | int | クライアントあたりの最大TCPレーン同時フロー数（デフォルト256）。`server.conf.example` では 2048 |
 | `tcp_idle_timeout_sec` | int | TCPレーンのアイドルタイムアウト（秒） |
 | `tcp_connect_timeout_sec` | int | TCPレーン接続タイムアウト（秒） |
 | `tcp_max_global_flows` | int | サーバー全体の最大TCPレーン数（デフォルト4096） |
 
-推奨: クライアント側で有効化（`enabled: true`）。`tcp: "stream"` にすると少ないパスでもTCPレーンが有効になるため、マルチパスが不完全な環境でも帯域集約の恩恵を受けやすい。
+推奨: 現行の運用（`configuration.nix` / `server.conf.example`）では無効（`enabled: false`）。実環境計測で有効時に ~300 Mbps へスループットが低下したため。有効化する場合は `tcp: "stream"` にすると少ないパスでもTCPレーンが有効になるため、マルチパスが不完全な環境でも帯域集約の恩恵を受けやすい。
 
 ## 特別な注意が必要な設定
 
