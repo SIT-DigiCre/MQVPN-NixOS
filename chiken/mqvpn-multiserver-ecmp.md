@@ -21,10 +21,17 @@
   が次の 3 つを 3 秒周期で保守する:
   - **サーバーピン**: `<server-ip>/32 via <WAN GW>` (manage_routes=false では上流の
     setup_routes が動かないため自前でピン。WAN デフォルトが消えても制御プレーンが生存する。
+    GW は可視の WAN デフォルト優先、無ければ dhcpcd の現在リース (routers=) で補完。
     GW が無い IF はスキップ — on-link の connected ルートに任せる)
-  - **ECMP デフォルト**: 生存トンネル (dev + peer) のみで nexthop を組み**1 本以上あれば必ず
-    アサート** (tun 再作成時のルート全削除からは最長 3 秒で復旧)
-  - **fail-open**: 全トンネル死亡時は WAN デフォルトを復元
+  - **ECMP デフォルト**: nexthop オブジェクト (nhid) 方式。トンネル 1 本 = nh 1 個
+    (id 1000+i)、生存集合をグループ id 2000 に毎ループ add-or-replace で同期し、
+    デフォルトは `nhid 2000` を指す (replace は未存在対象を作らないため add 併用)。
+    tun 再作成でカーネルが nh ごと削除しても、グループは自動縮退し**ルートは
+    生存メンバーで継続** (黒塗りゼロ)。全滅時はカーネルがグループ・ルートを
+    自動削除 → fail-open へ。※ iproute2 は新構文: `group 1000/1001` (重みは
+    `1000,1/1001,1`)、空グループは作成不可
+  - **fail-open**: 全トンネル死亡時は WAN デフォルトを復元 (遷移時のみ成功ログ、
+    失敗は毎ループログ — 古い GW は dhcpcd リースで自己修復)
 - NAT: ルーターは mark 方式 (eth1 入力で MARK) → `nixos-nat-post` に全トンネルの MASQUERADE。
   FW は eth1→各 tun の FORWARD 許可を `networking.firewall.extraForwardRules` で生成。
 - パスの共有 (同一 NIC 5 本を 2 トンネルで分割利用) のスケジューリング影響は

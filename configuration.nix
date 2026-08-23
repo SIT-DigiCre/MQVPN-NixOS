@@ -404,23 +404,14 @@ description = "MQVPN hybrid TCP lane config";
                 }
                 wan_ifaces="${wanIfaces}"
                 server_host="${serverHost}"
-                # 最後に観測した WAN デフォルトの nexthops。
-                # ループごとに保持 (WAN デフォルトが見えている間のみ更新) —
-                # ECMP デフォルトに置換された後は ip route show dev では
-                # 見えないため、全トンネル死亡時の復元に「前回の記憶」を使う
+                # 最後に観測した WAN デフォルトの nexthops (トンネル稼働中は ECMP に置換され
+                # 見えないため、復元用にループ間で保持 — 前回の記憶)
                 wan_nexthops=""
                 wan_restored=""
                 while true; do
-                  # 1) WAN GW の発見 + サーバーピン。
-                  #    発見は 2 源: ①WAN デフォルトが可視の間はその nexthops
-                  #    (適用済み状態 = 最優先)、②見えない間 (= トンネル稼働中で
-                  #    凍結しがち) は dhcpcd の現在リース (routers=) で補完。
-                  #    DHCP 更新で GW が変わったまま全トンネルが死んでも、
-                  #    次のループで正しい GW による復元が可能。二重化で
-                  #    「WAN デフォルトが無くて発見不能 → 永久凍結」を防ぐ。
-                  #    (/32 ピンは nexthop 形式の 1 回の replace = 複数 GW は
-                  #    マルチパス。IF ごとの replace だと同一 prefix を上書きし
-                  #    最後の 1 本しか残らないため)
+                  # 1) WAN GW の発見 (可視デフォルト優先、無ければ dhcpcd リースで補完 —
+                  #    GW 変更凍結の防止) + サーバーピン (/32 を nexthop 1 回で
+                  #    replace。IF ごとに分けると最後の 1 本しか残らない)
                   new_wan=""
                   if [ -n "$server_host" ]; then
                     for ifx in $wan_ifaces; do
@@ -439,26 +430,33 @@ description = "MQVPN hybrid TCP lane config";
                     fi
                   fi
 
-                  # 2) 生存トンネルのみで ECMP デフォルトをアサート (全滅まで必ず張る)
-                  n=0
-                  args=""
+                  # 2) 生存トンネル集合を nhid グループ (id 2000) に同期して ECMP デフォルトを張る。
+                  #    tun 再作成でカーネルが nh ごと削除してもグループは自動縮退し
+                  #    ルートは生存メンバーで継続 (旧方式の全削除黒塗りが消える)。
+                  #    全滅時はカーネルがグループ/ルートを消す → fail-open へ。
+                  members=""
                   ${lib.concatStringsSep "\n" (
-                    map (t: ''
+                    lib.imap1 (i: t: ''
                       dev="${t.dev}"
-                      w=${toString t.weight}
-                      if [ -d "/sys/class/net/$dev" ]; then
-                        peer=$(peer_of "$dev")
-                        if [ -n "$peer" ]; then
-                          args="$args nexthop via $peer dev $dev weight $w"
-                          n=$((n + 1))
-                        fi
+                      nhid=$((1000 + ${toString i}))
+                      peer=$(peer_of "$dev")
+                      if [ -n "$peer" ]; then
+                        ip nexthop add id $nhid via $peer dev $dev 2>/dev/null ||
+                          ip nexthop replace id $nhid via $peer dev $dev 2>/dev/null ||
+                          echo "mqvpn-ecmp-assert: nexthop $nhid sync failed ($dev)" >&2
+                        members="$members/$nhid"
+                      else
+                        ip nexthop del id $nhid 2>/dev/null
                       fi
                     '') ecmpTunnels
                   )}
-                  if [ "$n" -gt 0 ]; then
-                    # 生存トンネルあり → ECMP アサート (トンネル復帰で再アサート)
-                    if ! ip route replace default $args 2>/dev/null; then
-                      echo "mqvpn-ecmp-assert: ECMP default replace failed (tunnels=$n)" >&2
+                  if [ -n "$members" ]; then
+                    m="''${members#/}"
+                    ip nexthop add id 2000 group "$m" 2>/dev/null ||
+                      ip nexthop replace id 2000 group "$m" 2>/dev/null ||
+                      echo "mqvpn-ecmp-assert: group 2000 sync failed ($m)" >&2
+                    if ! ip route replace default nhid 2000 2>/dev/null; then
+                      echo "mqvpn-ecmp-assert: default nhid 2000 replace failed (members=$m)" >&2
                     fi
                     wan_restored=""
                   else
