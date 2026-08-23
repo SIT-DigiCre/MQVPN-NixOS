@@ -51,15 +51,17 @@ in {
     vmWanAddresses)
   ];
 
-  # qemu の NIC 構成を完全に明示 (ビルダー既定の user-net を含め一切自動追加させない)
+  # qemu の NIC 構成を完全に明示 (ビルダー既定の user-net を含め一切自動追加させない)。
+  # MAC は 3 VM 間で共有ブリッジ上ユニークになるよう明示 (-nic の MAC 省略時は
+  # 52:54:00:12:34:56 + index の決定的な値になり、他 VM と衝突するため不可)
   virtualisation.vmVariant.virtualisation.qemu.networkingOptions = lib.mkForce [
-    "-nic tap,ifname=tr-mq,script=no,downscript=no,model=virtio-net-pci"
-    "-nic tap,ifname=trw0,script=no,downscript=no,model=virtio-net-pci"
-    "-nic tap,ifname=tr-mgmt,script=no,downscript=no,model=virtio-net-pci"
-    "-nic tap,ifname=trw1,script=no,downscript=no,model=virtio-net-pci"
-    "-nic tap,ifname=trw2,script=no,downscript=no,model=virtio-net-pci"
-    "-nic tap,ifname=trw3,script=no,downscript=no,model=virtio-net-pci"
-    "-nic tap,ifname=trw4,script=no,downscript=no,model=virtio-net-pci"
+    "-nic tap,ifname=tr-mq,script=no,downscript=no,model=virtio-net-pci,mac=52:54:00:12:34:5a"
+    "-nic tap,ifname=trw0,script=no,downscript=no,model=virtio-net-pci,mac=52:54:00:12:34:5b"
+    "-nic tap,ifname=tr-mgmt,script=no,downscript=no,model=virtio-net-pci,mac=52:54:00:12:34:5c"
+    "-nic tap,ifname=trw1,script=no,downscript=no,model=virtio-net-pci,mac=52:54:00:12:34:5d"
+    "-nic tap,ifname=trw2,script=no,downscript=no,model=virtio-net-pci,mac=52:54:00:12:34:5e"
+    "-nic tap,ifname=trw3,script=no,downscript=no,model=virtio-net-pci,mac=52:54:00:12:34:5f"
+    "-nic tap,ifname=trw4,script=no,downscript=no,model=virtio-net-pci,mac=52:54:00:12:34:60"
   ];
 
   # auth はシークレットのみ (server_addr は IP のみ、port は公開オプション clientPorts で指定)

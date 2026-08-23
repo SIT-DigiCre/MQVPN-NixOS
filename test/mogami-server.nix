@@ -95,8 +95,8 @@ in
     virtualisation.graphics = false;
     virtualisation.qemu.options = [ ];
     virtualisation.qemu.networkingOptions = lib.mkForce [
-      "-nic tap,ifname=ts-mgmt,script=no,downscript=no,model=virtio-net-pci"
-      "-nic tap,ifname=ts-mq,script=no,downscript=no,model=virtio-net-pci"
+      "-nic tap,ifname=ts-mgmt,script=no,downscript=no,model=virtio-net-pci,mac=52:54:00:12:34:58"
+      "-nic tap,ifname=ts-mq,script=no,downscript=no,model=virtio-net-pci,mac=52:54:00:12:34:59"
     ];
   };
 

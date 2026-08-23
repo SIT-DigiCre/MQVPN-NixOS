@@ -13,20 +13,16 @@
     # 管理は mq-mgmt-br0 の tap (mgmt にデフォルトルート無し → テスト経路の外に
     # 抜ける経路が構造的に存在しない)
     virtualisation.qemu.networkingOptions = lib.mkForce [
-      "-nic tap,ifname=tc-mq,script=no,downscript=no,model=virtio-net-pci"
-      "-nic tap,ifname=tc-mgmt,script=no,downscript=no,model=virtio-net-pci"
+      "-nic tap,ifname=tc-mq,script=no,downscript=no,model=virtio-net-pci,mac=52:54:00:12:34:56"
+      "-nic tap,ifname=tc-mgmt,script=no,downscript=no,model=virtio-net-pci,mac=52:54:00:12:34:57"
     ];
   };
 
-  # eth0: tap tc-mq → router VM LAN (172.16.0.0/12、デフォルトルートはここ)
-  # eth1: tap tc-mgmt → mq-mgmt-br0 (192.168.50.3/24、ルート無し = SSH 管理専用)
+  # eth0: tap tc-mq → router VM LAN (172.16.0.0/12)
+  # DHCP (kea) から IP / デフォルト GW / DNS (172.16.0.1 = ルーター unbound) を受領 —
+  # 実機 LAN クライアントと同じ動作にする
   networking.interfaces."eth0" = {
-    ipv4.addresses = [
-      {
-        address = "172.16.0.2";
-        prefixLength = 12;
-      }
-    ];
+    useDHCP = true;
   };
 
   networking.interfaces."eth1" = {
@@ -38,8 +34,6 @@
       }
     ];
   };
-
-  networking.defaultGateway = "172.16.0.1";
 
   fileSystems."/" = {
     device = "tmpfs";
