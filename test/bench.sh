@@ -68,26 +68,26 @@ SAMP
 }
 
 # --- netem ---
-rtr_wan=(eth2 eth4 eth5 eth6 eth7)
+rtr_wan=(eth1 eth3 eth4 eth5 eth6)
 
 clear_netem() {
-  ssh_rtr 'for i in eth2 eth4 eth5 eth6 eth7; do sudo -n tc qdisc del dev $i root 2>/dev/null || true; done; echo netem-cleared' 2>/dev/null || true
+  ssh_rtr 'for i in eth1 eth3 eth4 eth5 eth6; do sudo -n tc qdisc del dev $i root 2>/dev/null || true; done; echo netem-cleared' 2>/dev/null || true
 }
 
 apply_uniform() {
   local ms="$1"
-  ssh_rtr "for i in eth2 eth4 eth5 eth6 eth7; do
+  ssh_rtr "for i in eth1 eth3 eth4 eth5 eth6; do
     sudo -n tc qdisc replace dev \$i root netem delay ${ms}ms limit 100000 2>/dev/null ||
     sudo -n tc qdisc add dev \$i root netem delay ${ms}ms limit 100000
   done; echo applied" 2>/dev/null
 }
 
 apply_hetero() {
-  ssh_rtr 'sudo -n tc qdisc add dev eth2 root netem delay 45ms 12ms loss 1% limit 100000 2>/dev/null || sudo -n tc qdisc replace dev eth2 root netem delay 45ms 12ms loss 1% limit 100000;
-sudo -n tc qdisc add dev eth4 root netem delay 45ms 12ms loss 1% limit 100000 2>/dev/null || sudo -n tc qdisc replace dev eth4 root netem delay 45ms 12ms loss 1% limit 100000;
+  ssh_rtr 'sudo -n tc qdisc add dev eth1 root netem delay 45ms 12ms loss 1% limit 100000 2>/dev/null || sudo -n tc qdisc replace dev eth1 root netem delay 45ms 12ms loss 1% limit 100000;
+sudo -n tc qdisc add dev eth3 root netem delay 45ms 12ms loss 1% limit 100000 2>/dev/null || sudo -n tc qdisc replace dev eth3 root netem delay 45ms 12ms loss 1% limit 100000;
+sudo -n tc qdisc add dev eth4 root netem delay 75ms 25ms loss 0.5% limit 100000 2>/dev/null || sudo -n tc qdisc replace dev eth4 root netem delay 75ms 25ms loss 0.5% limit 100000;
 sudo -n tc qdisc add dev eth5 root netem delay 75ms 25ms loss 0.5% limit 100000 2>/dev/null || sudo -n tc qdisc replace dev eth5 root netem delay 75ms 25ms loss 0.5% limit 100000;
-sudo -n tc qdisc add dev eth6 root netem delay 75ms 25ms loss 0.5% limit 100000 2>/dev/null || sudo -n tc qdisc replace dev eth6 root netem delay 75ms 25ms loss 0.5% limit 100000;
-sudo -n tc qdisc add dev eth7 root netem delay 15ms 4ms loss 0.2% limit 100000 2>/dev/null || sudo -n tc qdisc replace dev eth7 root netem delay 15ms 4ms loss 0.2% limit 100000;
+sudo -n tc qdisc add dev eth6 root netem delay 15ms 4ms loss 0.2% limit 100000 2>/dev/null || sudo -n tc qdisc replace dev eth6 root netem delay 15ms 4ms loss 0.2% limit 100000;
 echo applied' 2>/dev/null
 }
 
@@ -112,7 +112,7 @@ run_udp() { # rate dir sec
   local rate="$1" dir="$2" sec="$3"
   local flag=""
   [ "$dir" = "down" ] && flag="-R"
-  ssh_cli "nix --extra-experimental-features 'nix-command flakes' shell nixpkgs#iperf3 --command iperf3 -c 192.168.0.1 -p 6205 -u ${flag} -b ${rate}M -t ${sec} -f m 2>&1 | grep receiver | tail -1" 2>/dev/null | tail -1
+  ssh_cli "iperf3 -c 192.168.0.1 -p 6205 -u ${flag} -b ${rate}M -t ${sec} -f m 2>&1 | grep receiver | tail -1" 2>/dev/null | tail -1
 }
 
 ensure_iperfd() {
@@ -167,7 +167,6 @@ case "$CMD" in
     ensure_iperfd; ensure_rmem; ship_common; clear_netem; apply_uniform "$MS"
     sleep 8
     PERF=$(ssh_srv "command -v perf 2>/dev/null | tail -1")
-    [ -n "$PERF" ] || PERF=$(ssh_srv "nix --extra-experimental-features 'nix-command flakes' shell nixpkgs#linuxPackages_latest.perf -c bash -c 'command -v perf' 2>/dev/null | tail -1")
     [ -n "$PERF" ] || { echo "perf not found on server"; exit 1; }
     PERFDATA=/tmp/perf.data
     ssh_srv "rm -f ${PERFDATA}; sudo -n bash -c 'nohup ${PERF} record -F 99 -e cpu-clock -g -p \$(pgrep -x mqvpn) -o ${PERFDATA} -- sleep $((SEC + 4)) >/tmp/perf-record.log 2>&1 &'" >/dev/null 2>&1

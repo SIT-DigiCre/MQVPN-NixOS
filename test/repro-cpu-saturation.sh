@@ -54,8 +54,7 @@ nohup /tmp/cpusamp.sh '"$((DUR + 6))"' > /tmp/cpu.log 2>&1 &
 echo sampler-started'
 
 echo "=== step 3: クライアント VM から ${N} 並列で iperf3 実行 (${DUR}s) ==="
-"$SCRIPT_DIR/ssh-client.sh" "nix --extra-experimental-features 'nix-command flakes' shell nixpkgs#iperf3 nixpkgs#jq --command bash -c '
-rm -f /tmp/ip_*.json /tmp/ip_*.err
+"$SCRIPT_DIR/ssh-client.sh" "rm -f /tmp/ip_*.json /tmp/ip_*.err
 for p in \$(seq ${PORT_BASE} $((PORT_BASE + N - 1))); do
   (iperf3 -c 192.168.0.1 -p \$p -t ${DUR} --json > /tmp/ip_\$p.json 2>/tmp/ip_\$p.err) &
 done
@@ -64,7 +63,7 @@ for p in \$(seq ${PORT_BASE} $((PORT_BASE + N - 1))); do
   b=\$(jq -r \".end.sum_sent.bits_per_second // 0\" /tmp/ip_\$p.json 2>/dev/null)
   printf \"client %2d: %.0f Mbit/s\\n\" \$((p - ${PORT_BASE} + 1)) \$(awk -v v=\$b \"BEGIN{printf \\\"%.1f\\\", v/1e6}\")
 done
-jq -s \"[.[] | .end.sum_sent.bits_per_second // 0] | {total_mbit_s: (add/1e6), clients_with_data: ([.[]|select(.>0)]|length)}\" /tmp/ip_*.json'"
+jq -s \"[.[] | .end.sum_sent.bits_per_second // 0] | {total_mbit_s: (add/1e6), clients_with_data: ([.[]|select(.>0)]|length)}\" /tmp/ip_*.json"
 
 echo "=== step 4: サーバー mqvpn CPU ログ (100 jiffies/s = 1コア飽和) ==="
 sleep 1

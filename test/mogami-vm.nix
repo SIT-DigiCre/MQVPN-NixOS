@@ -4,42 +4,63 @@
   pkgs,
   ...
 }: let
-  # eth0:   build-vm default (IPv4LL/link-local, unused)
-  # eth1:   tap tr-mq - LAN (static 172.16.0.1/12)
-  # eth3:   SLiRP mgmt (hostfwd tcp::2223→:22, 10.0.2.0/24)
-  # eth2/4-7:  WAN - 5× tap via mqvpn-srv-br0 → server VM (10.200.0.1)
-  vmLanInterface = "eth1";
-  vmWanInterfaces = ["eth2" "eth4" "eth5" "eth6" "eth7"];
+  # 管理ネットワークは専用 tap ブリッジ mq-mgmt-br0 (192.168.50.0/24)。
+  # VM 内に mgmt のデフォルトルートは置かない (テスト経路の外への経路を構造的に持たない)。
+  #
+  #  qemu 引数順 (networkingOptions) = eth 番号:
+  #   eth0: tap tr-mq    - LAN (static 172.16.0.1/12)
+  #   eth1: tap trw0     - WAN0
+  #   eth2: tap tr-mgmt  - mgmt (static 192.168.50.1/24, ルート無し)
+  #   eth3-6: tap trw1-4 - WAN1-4
+  vmLanInterface = "eth0";
+  vmMgmtInterface = "eth2";
+  vmWanInterfaces = ["eth1" "eth3" "eth4" "eth5" "eth6"];
+  vmMgmtAddr = "192.168.50.1";
+  # ECMP 対象の WAN: eth 番号 → サーバーブリッジ側アドレス
+  vmWanAddresses = {
+    eth1 = "10.200.0.2";
+    eth3 = "10.200.0.3";
+    eth4 = "10.200.0.4";
+    eth5 = "10.200.0.5";
+    eth6 = "10.200.0.6";
+  };
 in {
   networking.hostName = lib.mkForce "mogami-vm";
 
   networking.useDHCP = false;
 
-  networking.interfaces.eth0.useDHCP = false;
+  # LAN / mgmt / WAN の静的設定
+  networking.interfaces = lib.mkMerge [
+    {
+      "${vmLanInterface}" = {
+        useDHCP = false;
+        ipv4.addresses = [{ address = "172.16.0.1"; prefixLength = 12; }];
+      };
+      "${vmMgmtInterface}" = {
+        useDHCP = false;
+        ipv4.addresses = [{ address = vmMgmtAddr; prefixLength = 24; }];
+      };
+    }
+    (lib.mapAttrs' (iface: addr: {
+      name = iface;
+      value = {
+        useDHCP = false;
+        ipv4.addresses = [{ address = addr; prefixLength = 24; }];
+      };
+    })
+    vmWanAddresses)
+  ];
 
-  # Mgmt (DHCP — SLiRP, SSH port forwarding tcp::2223→:22)
-  networking.interfaces.eth3.useDHCP = true;
-
-  # LAN (static)
-  networking.interfaces."${vmLanInterface}" = {
-    useDHCP = false;
-    ipv4.addresses = [{
-      address = "172.16.0.1";
-      prefixLength = 12;
-    }];
-  };
-
-  # WAN (5× tap — 10.200.0.0/24)
-  networking.interfaces.eth2.useDHCP = false;
-  networking.interfaces.eth2.ipv4.addresses = [{ address = "10.200.0.2"; prefixLength = 24; }];
-  networking.interfaces.eth4.useDHCP = false;
-  networking.interfaces.eth4.ipv4.addresses = [{ address = "10.200.0.3"; prefixLength = 24; }];
-  networking.interfaces.eth5.useDHCP = false;
-  networking.interfaces.eth5.ipv4.addresses = [{ address = "10.200.0.4"; prefixLength = 24; }];
-  networking.interfaces.eth6.useDHCP = false;
-  networking.interfaces.eth6.ipv4.addresses = [{ address = "10.200.0.5"; prefixLength = 24; }];
-  networking.interfaces.eth7.useDHCP = false;
-  networking.interfaces.eth7.ipv4.addresses = [{ address = "10.200.0.6"; prefixLength = 24; }];
+  # qemu の NIC 構成を完全に明示 (ビルダー既定の user-net を含め一切自動追加させない)
+  virtualisation.vmVariant.virtualisation.qemu.networkingOptions = lib.mkForce [
+    "-nic tap,ifname=tr-mq,script=no,downscript=no,model=virtio-net-pci"
+    "-nic tap,ifname=trw0,script=no,downscript=no,model=virtio-net-pci"
+    "-nic tap,ifname=tr-mgmt,script=no,downscript=no,model=virtio-net-pci"
+    "-nic tap,ifname=trw1,script=no,downscript=no,model=virtio-net-pci"
+    "-nic tap,ifname=trw2,script=no,downscript=no,model=virtio-net-pci"
+    "-nic tap,ifname=trw3,script=no,downscript=no,model=virtio-net-pci"
+    "-nic tap,ifname=trw4,script=no,downscript=no,model=virtio-net-pci"
+  ];
 
   # auth はシークレットのみ (server_addr は IP のみ、port は公開オプション clientPorts で指定)
   services.mqvpn.auth = {
@@ -51,7 +72,6 @@ in {
 
   virtualisation.vmVariant = {
     virtualisation.graphics = false;
-    virtualisation.forwardPorts = [];
     virtualisation.qemu.options = [];
   };
   hardware.enableRedistributableFirmware = lib.mkForce false;
@@ -72,7 +92,6 @@ in {
     hashedPassword = lib.mkForce null;
     password = "router";
   };
-
 
   systemd.services.kea-dhcp4-server.preStart = lib.mkForce ''
     echo "Waiting for interface ${vmLanInterface} to be Running..."

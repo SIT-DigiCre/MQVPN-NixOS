@@ -4,10 +4,12 @@
   ...
 }:
 let
-  # eth0: QEMU user-mode (internet access via NAT)
+  # eth0: tap ts-mgmt → mq-mgmt-br0 (192.168.50.2/24, 管理専用・ルート無し)
   # eth1: tap ts-mq → mqvpn-srv-br0 → router VM (10.200.0.0/24)
   vmLanInterface = "eth1";
   vmWanInterface = "eth0";
+  # 出口は持たない純ラボ島: NAT/ip_forward は設定しない
+  # (トンネル復元後のトラフィックはサーバー内でドロップされる)
   mqvpnServerSubnet = "192.168.0.0/24";
   mqvpnAuthKey = "mqvpn-test-key-2024";
   localIp = "10.200.0.1";
@@ -41,10 +43,6 @@ let
       enabled = true;
       tcp = "auto";
       tcp_max_flows = 2048;
-      # ラボ専用: 帯域テストの TCP レーン宛先に slirp GW の 10.0.2.2
-      # (常にホストの loopback へ届く固定アドレス)を使うため。
-      # egress ACL がデフォルトで RFC1918 宛を拒否するので明示許可する
-      egress_allow = [ "10.0.2.0/24" ];
     };
   };
 
@@ -68,7 +66,18 @@ in
   # NOTE: usePredictableInterfaceNames は VM ビルダーが boot.kernelParams に
   # net.ifnames=0 を追加するため実質無効。interface 名は常に ethX になる。
 
-  networking.useDHCP = true;
+  networking.useDHCP = false;
+
+  # eth0: mgmt (mq-mgmt-br0, SSH 管理専用・デフォルトルート無し)
+  networking.interfaces."${vmWanInterface}" = {
+    useDHCP = false;
+    ipv4.addresses = [
+      {
+        address = "192.168.50.2";
+        prefixLength = 24;
+      }
+    ];
+  };
 
   networking.interfaces."${vmLanInterface}" = {
     useDHCP = false;
@@ -80,26 +89,15 @@ in
     ];
   };
 
-  # eth0 (QEMU user-mode) gets a default route via QEMU gateway for internet access (NAT external)
-
-  boot.kernel.sysctl."net.ipv4.ip_forward" = 1;
-
-  networking.nat = {
-    enable = true;
-    internalInterfaces = [
-      "mqvpn0"
-      "mqvpn1"
-    ];
-    externalInterface = vmWanInterface;
-
-  };
-
   services.qemuGuest.enable = true;
 
   virtualisation.vmVariant = {
     virtualisation.graphics = false;
-    virtualisation.forwardPorts = [ ];
     virtualisation.qemu.options = [ ];
+    virtualisation.qemu.networkingOptions = lib.mkForce [
+      "-nic tap,ifname=ts-mgmt,script=no,downscript=no,model=virtio-net-pci"
+      "-nic tap,ifname=ts-mq,script=no,downscript=no,model=virtio-net-pci"
+    ];
   };
 
   hardware.enableRedistributableFirmware = false;

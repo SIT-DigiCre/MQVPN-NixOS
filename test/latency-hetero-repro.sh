@@ -7,14 +7,14 @@ set -euo pipefail
 # 均一遅延の実験(latency-repro.sh)ではスループットは落ちてもサーバーCPUは
 # 上がらなかった。実環境の「600Mbps @ サーバー単スレッド100%」は、パス間の
 # RTT差(順序逆転 → 受信側の reorder/reinjection 処理)や実ロス(再送・重複処理)が
-# 主因と仮説を立て、ルーター VM の WAN NIC (eth2/4-7) に netem を掛けて検証する。
+# 主因と仮説を立て、ルーター VM の WAN NIC (eth1/3-6) に netem を掛けて検証する。
 #
 # パス構成 (デフォルト = 実環境の分類に寄せた 5パス版):
-#   eth2: Starlink系  45ms ±12ms, ロス1%
-#   eth4: Starlink系  45ms ±12ms, ロス1%
+#   eth1: Starlink系  45ms ±12ms, ロス1%
+#   eth3: Starlink系  45ms ±12ms, ロス1%
+#   eth4: モバイル系  75ms ±25ms, ロス0.5%
 #   eth5: モバイル系  75ms ±25ms, ロス0.5%
-#   eth6: モバイル系  75ms ±25ms, ロス0.5%
-#   eth7: eduroam系   15ms ±4ms,  ロス0.2%
+#   eth6: eduroam系   15ms ±4ms,  ロス0.2%
 #   共通: limit 100000 (netemのキュー溢れによる疑似ロスを防ぐ)
 #
 # Usage: ./test/latency-hetero-repro.sh [duration_sec] [udp_rate_mbps] [clear]
@@ -28,7 +28,7 @@ MODE=${3:-run}
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 clear_netem() {
-  "$SCRIPT_DIR/ssh-router.sh" 'for i in eth2 eth4 eth5 eth6 eth7; do sudo -n tc qdisc del dev $i root 2>/dev/null || true; done; echo cleared'
+  "$SCRIPT_DIR/ssh-router.sh" 'for i in eth1 eth3 eth4 eth5 eth6; do sudo -n tc qdisc del dev $i root 2>/dev/null || true; done; echo cleared'
 }
 
 if [ "$MODE" = "clear" ]; then
@@ -39,12 +39,12 @@ fi
 echo "=== clearing old netem on router WAN NICs ==="
 clear_netem
 
-echo "=== applying heterogeneous netem on router WAN (eth2/4/5/6/7) ==="
-"$SCRIPT_DIR/ssh-router.sh" 'sudo -n tc qdisc add dev eth2 root netem delay 45ms 12ms loss 1% limit 100000;
-sudo -n tc qdisc add dev eth4 root netem delay 45ms 12ms loss 1% limit 100000;
+echo "=== applying heterogeneous netem on router WAN (eth1/3/4/5/6) ==="
+"$SCRIPT_DIR/ssh-router.sh" 'sudo -n tc qdisc add dev eth1 root netem delay 45ms 12ms loss 1% limit 100000;
+sudo -n tc qdisc add dev eth3 root netem delay 45ms 12ms loss 1% limit 100000;
+sudo -n tc qdisc add dev eth4 root netem delay 75ms 25ms loss 0.5% limit 100000;
 sudo -n tc qdisc add dev eth5 root netem delay 75ms 25ms loss 0.5% limit 100000;
-sudo -n tc qdisc add dev eth6 root netem delay 75ms 25ms loss 0.5% limit 100000;
-sudo -n tc qdisc add dev eth7 root netem delay 15ms 4ms loss 0.2% limit 100000;
+sudo -n tc qdisc add dev eth6 root netem delay 15ms 4ms loss 0.2% limit 100000;
 echo applied'
 
 echo "=== tunnel RTT check (client -> 192.168.0.1) ==="

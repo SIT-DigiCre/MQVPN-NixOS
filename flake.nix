@@ -92,16 +92,6 @@
           system = "x86_64-linux";
           modules = [
             ./test/mogami-server.nix
-            {
-              virtualisation.vmVariant = {
-                virtualisation.graphics = false;
-                virtualisation.forwardPorts = [ ];
-                virtualisation.qemu.networkingOptions = lib.mkForce [
-                  "-nic user,hostfwd=tcp::2224-:22,model=virtio-net-pci"
-                  "-nic tap,ifname=ts-mq,script=no,downscript=no,model=virtio-net-pci"
-                ];
-              };
-            }
           ] ++ commonModules;
         };
       };

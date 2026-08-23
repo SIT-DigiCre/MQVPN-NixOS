@@ -29,10 +29,11 @@ nix build "path:$REPO_DIR#nixosConfigurations.mogami-client.config.system.build.
 ln -sf /tmp/result-client "$SCRIPT_DIR/result-client" 2>/dev/null || true
 
 echo "=== cleanup stale interfaces ==="
-for tap in trw0 trw1 trw2 trw3 trw4 ts-mq; do
+for tap in trw0 trw1 trw2 trw3 trw4 ts-mq tr-mgmt ts-mgmt tc-mgmt; do
   sudo ip link delete "$tap" 2>/dev/null || true
 done
 sudo ip link delete mqvpn-srv-br0 2>/dev/null || true
+sudo ip link delete mq-mgmt-br0 2>/dev/null || true
 sudo ip link delete $TAP_CLIENT 2>/dev/null || true
 sudo ip link delete $TAP_ROUTER 2>/dev/null || true
 sudo ip link delete $BRIDGE 2>/dev/null || true
@@ -61,7 +62,22 @@ sudo ip tuntap add $TAP_CLIENT mode tap user "$USER"
 sudo ip link set $TAP_CLIENT master $BRIDGE
 sudo ip link set $TAP_CLIENT up
 
+echo "=== creating mgmt bridge: mq-mgmt-br0 (192.168.50.0/24) ==="
+sudo ip link add mq-mgmt-br0 type bridge
+sudo ip link set mq-mgmt-br0 addr 02:00:00:50:00:01
+sudo ip addr add 192.168.50.254/24 dev mq-mgmt-br0 2>/dev/null || true
+sudo ip link set mq-mgmt-br0 up
+# 管理ブリッジから外部への抜けは構造的に禁止 (テスト経路の外に抜けないため)
+sudo sysctl -w net.ipv4.conf.mq-mgmt-br0.forwarding=0 >/dev/null
+for tap in tr-mgmt ts-mgmt tc-mgmt; do
+  sudo ip tuntap add "$tap" mode tap user "$USER"
+  sudo ip link set "$tap" master mq-mgmt-br0
+  sudo ip link set "$tap" up
+  echo "  $tap -> mq-mgmt-br0"
+done
+
 echo ""
 echo "=== done ==="
 echo "WAN: 5x tap via mqvpn-srv-br0 -> server VM (10.200.0.1)"
 echo "LAN: $TAP_ROUTER + $TAP_CLIENT via $BRIDGE (172.16.0.0/12)"
+echo "Mgmt: 3x tap via mq-mgmt-br0 (192.168.50.1 router / .2 server / .3 client)"

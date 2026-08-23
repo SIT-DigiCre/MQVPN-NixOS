@@ -12,6 +12,12 @@ for tap in trw0 trw1 trw2 trw3 trw4 ts-mq; do
   sudo ip link delete "$tap" 2>/dev/null || true
 done
 
+echo "=== removing mgmt bridge + taps ==="
+sudo ip link delete mq-mgmt-br0 2>/dev/null || true
+for tap in tr-mgmt ts-mgmt tc-mgmt; do
+  sudo ip link delete "$tap" 2>/dev/null || true
+done
+
 echo "=== removing LAN bridge + taps ==="
 sudo ip link delete tc-mq 2>/dev/null || true
 sudo ip link delete tr-mq 2>/dev/null || true

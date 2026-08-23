@@ -4,9 +4,9 @@ set -euo pipefail
 SERVER_VM="$(readlink -f /tmp/result-server)/bin/run-mogami-server-vm"
 
 echo "=== starting server VM ==="
-echo "  SSH       : ssh digicre@localhost -p 2224  (password: server)"
-echo "  LAN       : ts-mq -> mqvpn-srv-br0 -> router VM"
-echo "  Tunnel    : mqvpn0 (10.10.0.1)"
+echo "  SSH  : ssh digicre@192.168.50.2  (password: server)"
+echo "  WAN  : ts-mq -> mqvpn-srv-br0 -> router VM"
+echo "  Mgmt : ts-mgmt -> mq-mgmt-br0 "
 echo ""
 
 exec "$SERVER_VM" -smp 4

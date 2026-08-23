@@ -10,14 +10,16 @@
   virtualisation.vmVariant = {
     virtualisation.graphics = false;
     virtualisation.qemu.options = [];
+    # 管理は mq-mgmt-br0 の tap (mgmt にデフォルトルート無し → テスト経路の外に
+    # 抜ける経路が構造的に存在しない)
     virtualisation.qemu.networkingOptions = lib.mkForce [
       "-nic tap,ifname=tc-mq,script=no,downscript=no,model=virtio-net-pci"
-      "-nic user,hostfwd=tcp::2222-:22,model=virtio-net-pci"
+      "-nic tap,ifname=tc-mgmt,script=no,downscript=no,model=virtio-net-pci"
     ];
   };
 
-  # eth0: tap tc-mq → router VM LAN (172.16.0.0/12)
-  # eth1: QEMU user-mode (SSH port forwarding, internet via NAT)
+  # eth0: tap tc-mq → router VM LAN (172.16.0.0/12、デフォルトルートはここ)
+  # eth1: tap tc-mgmt → mq-mgmt-br0 (192.168.50.3/24、ルート無し = SSH 管理専用)
   networking.interfaces."eth0" = {
     ipv4.addresses = [
       {
@@ -27,13 +29,17 @@
     ];
   };
 
-  networking.defaultGateway = "172.16.0.1";
+  networking.interfaces."eth1" = {
+    useDHCP = false;
+    ipv4.addresses = [
+      {
+        address = "192.168.50.3";
+        prefixLength = 24;
+      }
+    ];
+  };
 
-  # SLiRP (eth1 / user-mode net) が IPv6 RA を出すため、放っておくと
-  # クライアントは v6 経由で SLiRP 直抜けしてしまう (トンネル不通過)。
-  # ラボではテストの妥当性のため v6 を無効化する (実機クライアントは配布側の管轄外)。
-  networking.enableIPv6 = false;
-  networking.dhcpcd.extraConfig = "noipv6";
+  networking.defaultGateway = "172.16.0.1";
 
   fileSystems."/" = {
     device = "tmpfs";
@@ -65,6 +71,7 @@
   environment.systemPackages = with pkgs; [
     curl
     iperf3
+    jq
     tcpdump
     mtr
     dnsutils

@@ -84,19 +84,24 @@ MQVPN は 5 本の tap WAN NIC 経由でサーバー VM にマルチパス接続
 ```
 host
   ├── bridge mqvpn-br0
-  │     ├── tr-mq  ────── mogami-vm (eth1 = LAN)
+  │     ├── tr-mq  ────── mogami-vm (eth0 = LAN)
   │     └── tc-mq  ────── mogami-client (eth0 = LAN)
   │
   ├── bridge mqvpn-srv-br0
-  │     ├── trw0-4 ────── mogami-vm (eth2/4-7 = WAN)
+  │     ├── trw0-4 ────── mogami-vm (eth1/3-6 = WAN)
   │     └── ts-mq  ────── mogami-server (eth1 = LAN)
   │
-  ├── SSH :2222 ──── mogami-client (eth1 = SSH管理)
-  ├── SSH :2223 ──── mogami-vm (eth3 = SSH管理)
-  ├── SSH :2224 ──── mogami-server (eth0 = SSH管理)
-  └── HTTP :8080 ──── mogami-vm (eth3, glances ダッシュボード)
+  ├── bridge mq-mgmt-br0 (192.168.50.0/24, 管理専用, forwarding=0)
+  │     ├── tr-mgmt ───── mogami-vm (eth2 = 管理, 192.168.50.1)
+  │     ├── ts-mgmt ───── mogami-server (eth0 = 管理, 192.168.50.2)
+  │     └── tc-mgmt ───── mogami-client (eth1 = 管理, 192.168.50.3)
+  │
+  ├── SSH digicre@192.168.50.1 ── mogami-vm (password: router)
+  ├── SSH digicre@192.168.50.2 ── mogami-server (password: server)
+  ├── SSH testuser@192.168.50.3 ── mogami-client (password: test)
+  └── HTTP http://192.168.50.1/ ── mogami-vm (eth2, glances ダッシュボード)
 
-  WAN: 5× tap (eth2/4-7) → mqvpn-srv-br0 → mogami-server (10.200.0.1:443)
+  WAN: 5× tap (eth1/3-6) → mqvpn-srv-br0 → mogami-server (10.200.0.1:443)
 ```
 
 ### IP range 一覧
@@ -106,33 +111,28 @@ host
 | LAN (Client↔Router) | `172.16.0.0/12` | Router `172.16.0.1`, Client `172.16.0.2` |
 | WAN (Router↔Server) | `10.200.0.0/24` | Server `10.200.0.1`, Router `10.200.0.2-6` (5 WAN パス) |
 | MQVPN トンネル | `192.168.0.0/24` | Server `192.168.0.1` (server mode), Router `192.168.0.x` (client) |
-| 管理 (SLiRP) | `10.0.2.0/24` | 各VM独立のQEMU SLiRP (衝突しない) |
+| 管理 | `192.168.50.0/24` | 専用 tap ブリッジ `mq-mgmt-br0` (Router .1 / Server .2 / Client .3、VM 内にデフォルトルート無し) |
 
-### NAT 境界 (3段)
+### NAT 境界 (1段 + 出口なし)
 
-Client がインターネットに出るまで 3 段の NAT が直列に入る:
+クライアントがトンネルに入るまでに NAT が 1 段入る。トンネル復元後のトラフィックはサーバーに NAT/フォワーディングが無いため、サーバー内でドロップされる (純ラボ島):
 
 ```
 Client (172.16.0.2)
-  → [NAT 1: Router] MASQUERADE on mqvpn0
+  → [NAT 1: Router] MASQUERADE on mqvpn0 (mark ベース)
     → MQVPN tunnel (192.168.0.0/24)
-      → [NAT 2: Server] MASQUERADE on eth0 (QEMU user-mode)
-        → QEMU user-mode (10.0.2.0/24)
-          → [NAT 3: QEMU SLiRP] ホストネットワークへ
+      → サーバーは転送しない (NAT/ip_forward 無し → ドロップ)
 ```
 
 | # | NAT 元 → 出力先 | 実施場所 | 設定ファイル |
 |---|----------------|----------|-------------|
-| 1 | `172.16.0.0/12` → `mqvpn0` | Router VM | `test/mogami-vm.nix:62-68` |
-| 2 | `192.168.0.0/24` → `eth0` (QEMU user-mode) | Server VM | `test/mogami-server.nix:61-66` |
-| 3 | QEMU user-mode NIC (`10.0.2.x`) → ホストNW | QEMU プロセス (SLiRP) | 各 start スクリプトの `-netdev user` |
+| 1 | `172.16.0.0/12` → `mqvpn0/1` (mark ベース MASQUERADE) | Router VM | `test/mogami-vm.nix:81`, `configuration.nix:204` |
 
 - **NAT 1**: ルーターが LAN からのトラフィックを MQVPN トンネルに通す
-- **NAT 2**: サーバーがトンネル復元後のトラフィックを QEMU user-mode NIC 経由で外に出す
-- **NAT 3**: QEMU が VM 内部の user-mode IP をホストのネットワークに NAT する
+- トンネル復元後のトラフィックはサーバーが転送せずにドロップ (インターネット egress は無い)
 
 - **mogami-vm**: ルーター (DHCP/DNS/ファイアウォール/NAT/MQVPNクライアント)
-- **mogami-server**: MQVPN サーバー (トンネル終端, NAT2: tunnel→WAN, `10.200.0.1:443` で待受)
+- **mogami-server**: MQVPN サーバー (トンネル終端, 出口なし, `10.200.0.1:443` で待受)
 - **mogami-client**: 下流クライアント（静的IP 172.16.0.2/12, デフォルトGW 172.16.0.1）
 
 ### mogami-vm ネットワークインターフェース
@@ -141,19 +141,19 @@ Client (172.16.0.2)
 
 | Interface | 役割 | 方式 |
 |-----------|------|------|
-| `eth0` | build-vm default (unused) | IPv4LL |
-| `eth1` | LAN (tap tr-mq → mqvpn-br0) | 172.16.0.1/12 固定 |
-| `eth2` | WAN0 (tap trw0 → mqvpn-srv-br0) | 10.200.0.2/24 固定 |
-| `eth3` | SSH管理 (hostfwd `:2223`→`:22`) | DHCP (10.0.2.0/24) |
-| `eth4` | WAN1 (tap trw1 → mqvpn-srv-br0) | 10.200.0.3/24 固定 |
-| `eth5` | WAN2 (tap trw2 → mqvpn-srv-br0) | 10.200.0.4/24 固定 |
-| `eth6` | WAN3 (tap trw3 → mqvpn-srv-br0) | 10.200.0.5/24 固定 |
-| `eth7` | WAN4 (tap trw4 → mqvpn-srv-br0) | 10.200.0.6/24 固定 |
+| `eth0` | LAN (tap tr-mq → mqvpn-br0) | 172.16.0.1/12 固定 |
+| `eth1` | WAN0 (tap trw0 → mqvpn-srv-br0) | 10.200.0.2/24 固定 |
+| `eth2` | 管理 (tap tr-mgmt → mq-mgmt-br0) | 192.168.50.1/24 固定 (ルート無し) |
+| `eth3` | WAN1 (tap trw1 → mqvpn-srv-br0) | 10.200.0.3/24 固定 |
+| `eth4` | WAN2 (tap trw2 → mqvpn-srv-br0) | 10.200.0.4/24 固定 |
+| `eth5` | WAN3 (tap trw3 → mqvpn-srv-br0) | 10.200.0.5/24 固定 |
+| `eth6` | WAN4 (tap trw4 → mqvpn-srv-br0) | 10.200.0.6/24 固定 |
 
 注意点:
 - VM ビルダーが `boot.kernelParams` に `net.ifnames=0` を追加するため、`usePredictableInterfaceNames` の設定は実質無効になる。
 - この VM には disko/impermanence の設定は含まれていない（実機向け `mogami` 設定のみ）。
-- WAN の tap NIC (`eth2`, `eth4-7`) はブリッジ `mqvpn-srv-br0` 経由でサーバー VM に接続する。
+- WAN の tap NIC (`eth1`, `eth3-6`) はブリッジ `mqvpn-srv-br0` 経由でサーバー VM に接続する。
+- 管理はブリッジ `mq-mgmt-br0` (192.168.50.0/24) 経由。VM 内に mgmt のデフォルトルートは置かない (テスト経路の外への経路を構造的に持たない)。
 
 ## 使い方
 
