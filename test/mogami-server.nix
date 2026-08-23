@@ -2,7 +2,8 @@
   lib,
   pkgs,
   ...
-}: let
+}:
+let
   # eth0: QEMU user-mode (internet access via NAT)
   # eth1: tap ts-mq → mqvpn-srv-br0 → router VM (10.200.0.0/24)
   vmLanInterface = "eth1";
@@ -13,17 +14,20 @@
 
   mqvpn = pkgs.callPackage ../pkgs/mqvpn-dbg.nix { };
 
-  mqvpnCerts = pkgs.runCommand "mqvpn-certs" {
-    nativeBuildInputs = [pkgs.openssl];
-  } ''
-    openssl ecparam -genkey -name prime256v1 -noout -out key.pem
-    openssl req -new -x509 -key key.pem -out cert.pem -days 3650 \
-      -subj "/CN=mqtt-server.local" -addext "subjectAltName=DNS:mqtt-server.local,IP:${localIp}"
-    mkdir -p $out
-    cp key.pem cert.pem $out/
-  '';
+  mqvpnCerts =
+    pkgs.runCommand "mqvpn-certs"
+      {
+        nativeBuildInputs = [ pkgs.openssl ];
+      }
+      ''
+        openssl ecparam -genkey -name prime256v1 -noout -out key.pem
+        openssl req -new -x509 -key key.pem -out cert.pem -days 3650 \
+          -subj "/CN=mqtt-server.local" -addext "subjectAltName=DNS:mqtt-server.local,IP:${localIp}"
+        mkdir -p $out
+        cp key.pem cert.pem $out/
+      '';
 
-  mqvpnConfig = pkgs.writeText "mqvpn-server.json" (builtins.toJSON {
+  mqvpnServerBase = {
     mode = "server";
     listen = "0.0.0.0:443";
     subnet = mqvpnServerSubnet;
@@ -42,8 +46,24 @@
       # egress ACL がデフォルトで RFC1918 宛を拒否するので明示許可する
       egress_allow = [ "10.0.2.0/24" ];
     };
-  });
-in {
+  };
+
+  mqvpnConfig = pkgs.writeText "mqvpn-server.json" (builtins.toJSON mqvpnServerBase);
+
+  # マルチサーバー構成用の 2 つ目のサーバー (ECMP 検証用)
+  # 同一 VM 内でポート 4432 / サブネット 192.168.1.0/24 / tun mqvpn1。差分のみ上書き。
+  mqvpnConfigB = pkgs.writeText "mqvpn-server-b.json" (
+    builtins.toJSON (
+      mqvpnServerBase
+      // {
+        listen = "0.0.0.0:4432";
+        subnet = "192.168.1.0/24";
+        tun_name = "mqvpn1";
+      }
+    )
+  );
+in
+{
   networking.hostName = lib.mkForce "mogami-server";
   # NOTE: usePredictableInterfaceNames は VM ビルダーが boot.kernelParams に
   # net.ifnames=0 を追加するため実質無効。interface 名は常に ethX になる。
@@ -52,10 +72,12 @@ in {
 
   networking.interfaces."${vmLanInterface}" = {
     useDHCP = false;
-    ipv4.addresses = [{
-      address = localIp;
-      prefixLength = 24;
-    }];
+    ipv4.addresses = [
+      {
+        address = localIp;
+        prefixLength = 24;
+      }
+    ];
   };
 
   # eth0 (QEMU user-mode) gets a default route via QEMU gateway for internet access (NAT external)
@@ -64,7 +86,10 @@ in {
 
   networking.nat = {
     enable = true;
-    internalInterfaces = ["mqvpn0"];
+    internalInterfaces = [
+      "mqvpn0"
+      "mqvpn1"
+    ];
     externalInterface = vmWanInterface;
 
   };
@@ -73,22 +98,43 @@ in {
 
   virtualisation.vmVariant = {
     virtualisation.graphics = false;
-    virtualisation.forwardPorts = [];
-    virtualisation.qemu.options = [];
+    virtualisation.forwardPorts = [ ];
+    virtualisation.qemu.options = [ ];
   };
 
   hardware.enableRedistributableFirmware = false;
 
   systemd.services.mqvpn-server = {
-    description = "MQVPN VPN Server";
-    after = ["network-online.target"];
-    wants = ["network-online.target"];
-    wantedBy = ["multi-user.target"];
+    description = "MQVPN VPN Server A";
+    after = [ "network-online.target" ];
+    wants = [ "network-online.target" ];
+    wantedBy = [ "multi-user.target" ];
 
-    path = with pkgs; [iproute2 iptables];
+    path = with pkgs; [
+      iproute2
+      iptables
+    ];
 
     serviceConfig = {
       ExecStart = "${mqvpn}/bin/mqvpn --config ${mqvpnConfig}";
+      Restart = "on-failure";
+      RestartSec = "5";
+    };
+  };
+
+  systemd.services.mqvpn-server-b = {
+    description = "MQVPN VPN Server B";
+    after = [ "network-online.target" ];
+    wants = [ "network-online.target" ];
+    wantedBy = [ "multi-user.target" ];
+
+    path = with pkgs; [
+      iproute2
+      iptables
+    ];
+
+    serviceConfig = {
+      ExecStart = "${mqvpn}/bin/mqvpn --config ${mqvpnConfigB}";
       Restart = "on-failure";
       RestartSec = "5";
     };
@@ -105,7 +151,7 @@ in {
 
   users.users.digicre = {
     isNormalUser = true;
-    extraGroups = ["wheel"];
+    extraGroups = [ "wheel" ];
     hashedPassword = null;
     password = "server";
   };

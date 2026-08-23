@@ -29,6 +29,12 @@
 
   networking.defaultGateway = "172.16.0.1";
 
+  # SLiRP (eth1 / user-mode net) が IPv6 RA を出すため、放っておくと
+  # クライアントは v6 経由で SLiRP 直抜けしてしまう (トンネル不通過)。
+  # ラボではテストの妥当性のため v6 を無効化する (実機クライアントは配布側の管轄外)。
+  networking.enableIPv6 = false;
+  networking.dhcpcd.extraConfig = "noipv6";
+
   fileSystems."/" = {
     device = "tmpfs";
     fsType = "tmpfs";

@@ -44,7 +44,23 @@ in
   options.services.mqvpn.auth = lib.mkOption {
     type = lib.types.anything;
     default = builtins.fromJSON (builtins.readFile ./mqvpn-auth.json);
-    description = "MQVPN client auth config (server_addr, auth_key, etc.)";
+    description = ''
+      MQVPN クライアントのシークレット設定: auth_key とサーバー IP (server_addr は
+      **IP のみ**。port を含めてはならない — port は公開情報で services.mqvpn.clientPorts
+      が供給)。server_addr / auth_key は全クライアント共通で、クライアントごとに
+      ファイルを分けることはできない (複数クライアントは clientPorts の port のみで区別)。
+    '';
+  };
+
+  options.services.mqvpn.clientPorts = lib.mkOption {
+    type = lib.types.listOf lib.types.port;
+    default = [ 443 ];
+    description = ''
+      クライアントの接続先 server port リスト。サーバー IP (auth.server_addr) と
+      WAN NIC (interfaces) は全クライアント共通のため、port のみ個別指定する。
+      0-indexed: unit は mqvpn-0, mqvpn-1, ...、TUN 名は mqvpn0, mqvpn1, ... と
+      リスト順に自動付与。ECMP weight は全トンネル 1 (共通 NIC セットのため不変)。
+    '';
   };
 
   options.services.mqvpn.hybrid = lib.mkOption {
@@ -54,33 +70,83 @@ in
       tcp = "auto";
       tcp_max_flows = 2048;
     };
-    description = "MQVPN hybrid TCP lane config (tcp_max_flows 含む)";
+description = "MQVPN hybrid TCP lane config";
   };
 
   config =
     let
       mqvpnAuth = config.services.mqvpn.auth;
 
-      mqvpnConfig = pkgs.writeText "mqvpn.conf" (
-        builtins.toJSON (
-          {
-            mode = "client";
-            insecure = true;
-            tun_name = "mqvpn0";
-            log_level = "info";
-            kill_switch = false;
-            reconnect = true;
-            reconnect_interval = 5;
-            scheduler = "wlb";
-            cc = "bbr";
-            reinjection = "off";
-            manage_routes = true;
-            hybrid = config.services.mqvpn.hybrid;
-            paths = config.services.mqvpn.interfaces;
-          }
-          // mqvpnAuth
-        )
+      # 全クライアント共通の設定テンプレート (tun_name / server_addr は下で付与)
+      mqvpnClientTemplate = {
+        mode = "client";
+        insecure = true;
+        log_level = "info";
+        kill_switch = false;
+        reconnect = true;
+        reconnect_interval = 5;
+        scheduler = "wlb";
+        cc = "bbr";
+        reinjection = "off";
+        manage_routes = false;
+        hybrid = config.services.mqvpn.hybrid;
+        paths = config.services.mqvpn.interfaces;
+      };
+
+      # クライアント config 一覧 (0-indexed: リスト順に unit は mqvpn-0, mqvpn-1, ...、
+      # TUN 名は mqvpn0, mqvpn1, ... と自動付与)。
+      # server_addr = IP (auth) + port (clientPorts の各要素)
+      mqvpnClientConfigs = lib.imap0 (i: port: {
+        index = i;
+        unitName = "mqvpn-${toString i}";
+        tunName = "mqvpn${toString i}";
+        file = pkgs.writeText "mqvpn-${toString i}.conf" (
+          builtins.toJSON (
+            mqvpnClientTemplate
+            // {
+              tun_name = "mqvpn${toString i}";
+              server_addr = "${mqvpnAuth.server_addr}:${toString port}";
+            }
+            // (builtins.removeAttrs mqvpnAuth [ "server_addr" ])
+          )
+        );
+      }) config.services.mqvpn.clientPorts;
+
+      # 各クライアントの systemd unit
+      clientUnits = lib.listToAttrs (
+        map (c: {
+          name = c.unitName;
+          value = {
+            description = "Multi-Queue VPN Tunnel Daemon (${c.tunName})";
+            after = [ "network-online.target" ];
+            wants = [ "network-online.target" ];
+            wantedBy = [ "multi-user.target" ];
+
+            path = with pkgs; [
+              iproute2
+              iptables
+              bash
+            ];
+
+            serviceConfig = {
+              ExecStart = "${mqvpn}/bin/mqvpn --config ${c.file}";
+              Restart = "always";
+              RestartSec = "5s";
+            };
+          };
+        }) mqvpnClientConfigs
       );
+
+      # ECMP 対象のトンネル一覧 (dev + weight=1)。peer はサーバーから配布されるため
+      # 設定値を持たず、ECMP keeper が実行時にカーネルから導出する。
+      ecmpTunnels = map (c: {
+        dev = c.tunName;
+        weight = 1;
+      }) mqvpnClientConfigs;
+
+      # keeper スクリプトへ展開する WAN IF 一覧とサーバー IP
+      wanIfaces = lib.concatStringsSep " " config.services.mqvpn.interfaces;
+      serverHost = mqvpnAuth.server_addr or "";
     in
     {
       boot.kernelParams = [
@@ -126,6 +192,8 @@ in
       boot.kernel.sysctl = {
         "net.ipv4.ip_forward" = 1;
         "net.ipv4.conf.all.rp_filter" = 2;
+        # ECMP (複数トンネル) をフロー単位 (L4) でハッシュ分割する
+        "net.ipv4.fib_multipath_hash_policy" = 1;
       };
       networking.enableIPv6 = false;
       networking.dhcpcd.extraConfig = ''
@@ -136,36 +204,21 @@ in
       networking.nat = {
         enable = true;
         internalInterfaces = [ internalInterfaceName ];
-        externalInterface = "mqvpn0";
+        # 全トンネルに mark ベースの MASQUERADE。
+        # 現在の nixpkgs は externalInterface=null なら総称ルール
+        # (-m mark --mark 0x1 -j MASQUERADE) を自前発行するためこの行は重複だが、
+        # モジュール内部実装に依存せず明示するために残す (nixpkgs 更新で挙動が
+        # 変わる可能性があるため削除しない)。
+        extraCommands = lib.concatStringsSep "\n" (
+          map (c: ''
+            iptables -t nat -A nixos-nat-post -o ${c.tunName} -m mark --mark 0x1 -j MASQUERADE
+          '') mqvpnClientConfigs
+        );
       };
 
       # ---------------------------------------------------------------------
       # 4. LAN側：DHCP/DNSサーバー
       # ---------------------------------------------------------------------
-
-      systemd.services.kea-dhcp4-server = {
-        after = [ "network-online.target" ];
-        wants = [ "network-online.target" ];
-
-        preStart = ''
-          echo "Waiting for interface ${internalInterfaceName} to be Running..."
-          for i in {1..120}; do
-            if ${pkgs.iproute2}/bin/ip link show dev "${internalInterfaceName}" 2>/dev/null | grep -q "LOWER_UP"; then
-              echo "Interface ${internalInterfaceName} is up and running"
-              exit 0
-            fi
-            sleep 1
-          done
-
-          echo "Timeout waiting for interface ${internalInterfaceName}."
-          exit 1
-        '';
-
-        serviceConfig = {
-          Restart = lib.mkForce "always";
-          RestartSec = "5s";
-        };
-      };
 
       services.kea.dhcp4 = {
         enable = true;
@@ -291,26 +344,143 @@ in
       };
 
       # ---------------------------------------------------------------------
-      # 9. MQVPN
+      # 9. MQVPN (全クライアントは clientPorts から一様生成される)
       # ---------------------------------------------------------------------
-      systemd.services.mqvpn = {
-        description = "Multi-Queue VPN Tunnel Daemon";
-        after = [ "network-online.target" ];
-        wants = [ "network-online.target" ];
-        wantedBy = [ "multi-user.target" ];
+      systemd.services = lib.mkMerge [
+        {
+          kea-dhcp4-server = {
+            after = [ "network-online.target" ];
+            wants = [ "network-online.target" ];
 
-        path = with pkgs; [
-          iproute2
-          iptables
-          bash
-        ];
+            preStart = ''
+              echo "Waiting for interface ${internalInterfaceName} to be Running..."
+              for i in {1..120}; do
+                if ${pkgs.iproute2}/bin/ip link show dev "${internalInterfaceName}" 2>/dev/null | grep -q "LOWER_UP"; then
+                  echo "Interface ${internalInterfaceName} is up and running"
+                  exit 0
+                fi
+                sleep 1
+              done
 
-        serviceConfig = {
-          ExecStart = "${mqvpn}/bin/mqvpn --config ${mqvpnConfig}";
-          Restart = "always";
-          RestartSec = "5s";
-        };
-      };
+              echo "Timeout waiting for interface ${internalInterfaceName}."
+              exit 1
+            '';
+
+            serviceConfig = {
+              Restart = lib.mkForce "always";
+              RestartSec = "5s";
+            };
+          };
+        }
+        clientUnits
+        # ルートキーパー:
+        #  - サーバー制御プレーン経路のピン (manage_routes=false のため上流の setup_routes
+        #    は動かない。WAN デフォルトが消えても <server>/32 を GW 経由で維持する)
+        #  - ECMP デフォルトの再アサート (tun 再作成時はカーネルが ECMP ルートを全削除。
+        #    生存トンネルのみでアサートし、1 本でも生きていれば必ず張る)
+        #  - fail-open: 全トンネル死亡時は WAN デフォルトを復元
+        {
+          mqvpn-ecmp-assert = {
+            description = "ECMP default / server-pin route keeper";
+            after = [ "network-online.target" ] ++ map (c: "${c.unitName}.service") mqvpnClientConfigs;
+            wants = [ "network-online.target" ] ++ map (c: "${c.unitName}.service") mqvpnClientConfigs;
+            wantedBy = [ "multi-user.target" ];
+
+            path = with pkgs; [
+              iproute2
+              gawk
+              # fail-open / ピン用 GW の補完発見 (dhcpcd -U で現在リースを読む)
+              dhcpcd
+            ];
+
+            serviceConfig = {
+              Restart = "always";
+              RestartSec = "5";
+              ExecStart = pkgs.writeShellScript "mqvpn-ecmp-assert.sh" ''
+                # peer はサーバーから配布されるため kernel から導出する
+                peer_of() {
+                  ip -o addr show dev "$1" |
+                    awk '$3=="inet" { for (i=1; i<=NF; i++) if ($i=="peer") { split($(i+1), a, "/"); print a[1]; break } }'
+                }
+                wan_ifaces="${wanIfaces}"
+                server_host="${serverHost}"
+                # 最後に観測した WAN デフォルトの nexthops。
+                # ループごとに保持 (WAN デフォルトが見えている間のみ更新) —
+                # ECMP デフォルトに置換された後は ip route show dev では
+                # 見えないため、全トンネル死亡時の復元に「前回の記憶」を使う
+                wan_nexthops=""
+                wan_restored=""
+                while true; do
+                  # 1) WAN GW の発見 + サーバーピン。
+                  #    発見は 2 源: ①WAN デフォルトが可視の間はその nexthops
+                  #    (適用済み状態 = 最優先)、②見えない間 (= トンネル稼働中で
+                  #    凍結しがち) は dhcpcd の現在リース (routers=) で補完。
+                  #    DHCP 更新で GW が変わったまま全トンネルが死んでも、
+                  #    次のループで正しい GW による復元が可能。二重化で
+                  #    「WAN デフォルトが無くて発見不能 → 永久凍結」を防ぐ。
+                  #    (/32 ピンは nexthop 形式の 1 回の replace = 複数 GW は
+                  #    マルチパス。IF ごとの replace だと同一 prefix を上書きし
+                  #    最後の 1 本しか残らないため)
+                  new_wan=""
+                  if [ -n "$server_host" ]; then
+                    for ifx in $wan_ifaces; do
+                      gw=$(ip -4 route show dev "$ifx" default 2>/dev/null | awk '{print $3; exit}')
+                      if [ -z "$gw" ] || [ "$gw" = "0.0.0.0" ]; then
+                        gw=$(dhcpcd -U "$ifx" 2>/dev/null | sed -n 's/^routers=//p' | awk '{print $1}')
+                      fi
+                      [ -n "$gw" ] && [ "$gw" != "0.0.0.0" ] || continue
+                      new_wan="$new_wan via $gw dev $ifx"
+                    done
+                  fi
+                  [ -n "$new_wan" ] && wan_nexthops="$new_wan"
+                  if [ -n "$wan_nexthops" ] && [ -n "$server_host" ]; then
+                    if ! ip route replace $server_host $wan_nexthops 2>/dev/null; then
+                      echo "mqvpn-ecmp-assert: server pin replace failed: ip route replace $server_host $wan_nexthops" >&2
+                    fi
+                  fi
+
+                  # 2) 生存トンネルのみで ECMP デフォルトをアサート (全滅まで必ず張る)
+                  n=0
+                  args=""
+                  ${lib.concatStringsSep "\n" (
+                    map (t: ''
+                      dev="${t.dev}"
+                      w=${toString t.weight}
+                      if [ -d "/sys/class/net/$dev" ]; then
+                        peer=$(peer_of "$dev")
+                        if [ -n "$peer" ]; then
+                          args="$args nexthop via $peer dev $dev weight $w"
+                          n=$((n + 1))
+                        fi
+                      fi
+                    '') ecmpTunnels
+                  )}
+                  if [ "$n" -gt 0 ]; then
+                    # 生存トンネルあり → ECMP アサート (トンネル復帰で再アサート)
+                    if ! ip route replace default $args 2>/dev/null; then
+                      echo "mqvpn-ecmp-assert: ECMP default replace failed (tunnels=$n)" >&2
+                    fi
+                    wan_restored=""
+                  else
+                    # fail-open: 全トンネル死亡時は WAN デフォルトを復元。
+                    # 遷移時のみ成功ログ、失敗は毎ループログ (自己修復までの診断用)
+                    if [ -n "$wan_nexthops" ]; then
+                      if ip route replace default $wan_nexthops 2>/dev/null; then
+                        [ -z "$wan_restored" ] && echo "mqvpn-ecmp-assert: fail-open: WAN default restored ($wan_nexthops)" >&2
+                        wan_restored=1
+                      else
+                        echo "mqvpn-ecmp-assert: fail-open FAILED: $wan_nexthops (retry next loop)" >&2
+                        wan_restored=""
+                      fi
+                    fi
+                  fi
+                  sleep 3
+                done
+              '';
+            };
+          };
+        }
+      ];
 
       environment.systemPackages = with pkgs; [
         git

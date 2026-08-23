@@ -113,9 +113,27 @@
 
 ```json
 {
-    "server_addr": "your-server.com:443",
+    "server_addr": "your-server.com",
     "auth_key": "base64-encoded-psk..."
 }
 ```
 
-このファイルは `configuration.nix` の `services.mqvpn.auth` オプションから読み込まれる。**リポジトリにコミットしてはいけない**（`.gitignore` 対象）。
+- `server_addr` は **IP のみ** (port を含めてはならない)。IP はシークレット扱い。
+- port は公開情報で `services.mqvpn.clientPorts`（後述）が供給し、conf 生成時に連結する。
+- このファイルは `configuration.nix` の `services.mqvpn.auth` オプションから読み込まれる。**リポジトリにコミットしてはいけない**（`.gitignore` 対象）。`server_addr` / `auth_key` は**全クライアント共通**で、クライアントごとにファイルを分けることはできない（複数クライアントは `clientPorts` の port のみで区別する）。
+
+## services.mqvpn モジュール (本リポジトリの NixOS モジュール)
+
+`configuration.nix` で定義。複数クライアントは「port のみ」で一様に生成される:
+
+| オプション | 型 | デフォルト | 意味 |
+|-----------|----|-----------|------|
+| `services.mqvpn.auth` | anything | `./mqvpn-auth.json` | シークレット: `server_addr` (IP のみ) + `auth_key`。**全クライアント共通** (単一ファイルを共有) |
+| `services.mqvpn.clientPorts` | list of port | `[ 443 ]` | 接続先 server port リスト。0-indexed で unit `mqvpn-0`, `mqvpn-1`, … / TUN `mqvpn0`, `mqvpn1`, … を自動生成 |
+| `services.mqvpn.interfaces` | list of str | 実機の 7 NIC | WAN パス。**全クライアント共通** (マルチパス NIC はクライアントごとに変えない) |
+| `services.mqvpn.hybrid` | — | 無効 (`tcp_max_flows` = 2048) | Hybrid レーン設定 (clientBase へ展開。`tcp_max_flows` はこのオブジェクト内で指定) |
+
+- 各クライアント config: `server_addr = auth.server_addr + ":" + port`、`tun_name = mqvpn{i}`、`paths = interfaces`、CC は `wlb` + `bbr`、`reinjection = off`。
+- `mqvpn-ecmp-assert` unit が 3 秒周期で保守: ①サーバーピン `<server>/32 via WAN GW`
+  (manage_routes=false の補完)、②生存トンネル (≥1) のみで ECMP デフォルトをアサート、
+  ③全滅時は WAN デフォルト復元 (fail-open)。

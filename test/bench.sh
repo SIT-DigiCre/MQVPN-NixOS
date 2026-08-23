@@ -119,6 +119,13 @@ ensure_iperfd() {
   ssh_srv 'ss -tln | grep -q 6205 || iperf3 -s -p 6205 -D --logfile /tmp/iperf3-6205.log; echo iperfd-ok' >/dev/null 2>&1 || true
 }
 
+# --- クライアントの UDP 受信バッファ拡大 ---
+# 高レート測定 (特に RTT≈0 のラボ) では受信側ソケット溢れがロスに見えるため、
+# rmem を 64MB に拡大する (chiken/mqvpn-loss-investigation.md 参照)
+ensure_rmem() {
+  ssh_cli 'sudo -n sysctl -w net.core.rmem_max=67108864 net.core.rmem_default=67108864 >/dev/null; echo rmem-ok' >/dev/null 2>&1 || true
+}
+
 # =============================================================================
 CMDRUN="latency|hetero|multistream|profile|clean"
 
@@ -129,7 +136,7 @@ case "$CMD" in
     ;;
   latency)
     MS="${1:-50}"; RATE="${2:-800}"; SEC="${3:-15}"; DIR="${4:-down}"
-    ensure_iperfd; ship_common; clear_netem; apply_uniform "$MS"
+    ensure_iperfd; ensure_rmem; ship_common; clear_netem; apply_uniform "$MS"
     sleep 8
     ssh_cli "ping -c 2 -W 3 192.168.0.1 2>&1 | tail -1" 2>/dev/null | tail -1
     samp_start "$((SEC + 6))"
@@ -141,7 +148,7 @@ case "$CMD" in
     ;;
   hetero)
     RATE="${1:-800}"; SEC="${2:-15}"; DIR="${3:-down}"
-    ensure_iperfd; ship_common; clear_netem; apply_hetero
+    ensure_iperfd; ensure_rmem; ship_common; clear_netem; apply_hetero
     sleep 8
     samp_start "$((SEC + 6))"
     out=$(run_udp "$RATE" "$DIR" "$SEC")
@@ -152,12 +159,12 @@ case "$CMD" in
     ;;
   multistream)
     N="${1:-10}"; SEC="${2:-20}"
-    ensure_iperfd; ship_common
+    ensure_iperfd; ensure_rmem; ship_common
     "$SCRIPT_DIR/repro-cpu-saturation.sh" "$N" "$SEC"
     ;;
   profile)
     MS="${1:-50}"; RATE="${2:-800}"; SEC="${3:-15}"; DIR="${4:-down}"
-    ensure_iperfd; ship_common; clear_netem; apply_uniform "$MS"
+    ensure_iperfd; ensure_rmem; ship_common; clear_netem; apply_uniform "$MS"
     sleep 8
     PERF=$(ssh_srv "command -v perf 2>/dev/null | tail -1")
     [ -n "$PERF" ] || PERF=$(ssh_srv "nix --extra-experimental-features 'nix-command flakes' shell nixpkgs#linuxPackages_latest.perf -c bash -c 'command -v perf' 2>/dev/null | tail -1")

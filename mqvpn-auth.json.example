@@ -1,4 +1,4 @@
 {
-  "server_addr": "YOUR_SERVER:443",
+  "server_addr": "YOUR_SERVER_IP",
   "auth_key": "YOUR_AUTH_KEY"
 }

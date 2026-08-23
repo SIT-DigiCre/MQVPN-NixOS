@@ -41,8 +41,9 @@ in {
   networking.interfaces.eth7.useDHCP = false;
   networking.interfaces.eth7.ipv4.addresses = [{ address = "10.200.0.6"; prefixLength = 24; }];
 
+  # auth はシークレットのみ (server_addr は IP のみ、port は公開オプション clientPorts で指定)
   services.mqvpn.auth = {
-    server_addr = "10.200.0.1:443";
+    server_addr = "10.200.0.1";
     auth_key = "mqvpn-test-key-2024";
   };
 
@@ -61,6 +62,9 @@ in {
   services.kea.dhcp4.settings.interfaces-config.interfaces = lib.mkForce [vmLanInterface];
 
   services.mqvpn.interfaces = vmWanInterfaces;
+
+  # クライアントは port リストで定義 (IP は auth.server_addr、WAN NIC は interfaces)
+  services.mqvpn.clientPorts = [ 443 4432 ];
 
   services.openssh.settings.PasswordAuthentication = lib.mkForce true;
 
