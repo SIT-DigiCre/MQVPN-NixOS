@@ -166,8 +166,6 @@ in
 
   environment.systemPackages = with pkgs; [
     iperf3
-    # プロファイリング用。VM の /nix/store は volatile (tmpfs upper) なので、
-    # 起動後の nix install は再起動で消える。ビルド時に組み込んで常駐させる。
-    linuxPackages_latest.perf
+    perf
   ];
 }
