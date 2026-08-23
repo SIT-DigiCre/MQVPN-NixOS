@@ -4,12 +4,14 @@
   ...
 }:
 let
-  # eth0: tap ts-mgmt → mq-mgmt-br0 (192.168.50.2/24, 管理専用・ルート無し)
+  # eth0: tap ts-mgmt → mq-mgmt-br0 (192.168.50.2/24, 管理 + 上流への出口)
   # eth1: tap ts-mq → mqvpn-srv-br0 → router VM (10.200.0.0/24)
   vmLanInterface = "eth1";
   vmWanInterface = "eth0";
-  # 出口は持たない純ラボ島: NAT/ip_forward は設定しない
-  # (トンネル復元後のトラフィックはサーバー内でドロップされる)
+  # サーバー = トンネル集約点 (実機の VPN サーバー相当) で、上流への出口を持つ:
+  # トンネル復元後のトラフィックを NAT (eth0) → ホスト経由で実ネットワークへ。
+  # デフォルトルートはホスト (192.168.50.254)。ルーター/クライアントは出口を
+  # 持たないため、外部へは必ずトンネルを経由する (直抜け構造なし)。
   mqvpnServerSubnet = "192.168.0.0/24";
   mqvpnAuthKey = "mqvpn-test-key-2024";
   localIp = "10.200.0.1";
@@ -90,6 +92,18 @@ in
   };
 
   services.qemuGuest.enable = true;
+
+  # トンネル復元後のトラフィックを上流 (eth0 → ホスト) へ NAT
+  boot.kernel.sysctl."net.ipv4.ip_forward" = 1;
+  networking.nat = {
+    enable = true;
+    internalInterfaces = [
+      "mqvpn0"
+      "mqvpn1"
+    ];
+    externalInterface = vmWanInterface;
+  };
+  networking.defaultGateway = "192.168.50.254";
 
   virtualisation.vmVariant = {
     virtualisation.graphics = false;

@@ -1,20 +1,25 @@
 # マルチサーバー + ECMP 構成 (ラボ検証)
 
-> 更新: 2026-08-22
-> ブランチ: multi-server-ecmp。mqvpn v0.16.0 + 2 パッチ + reinjection=off。
+> 更新: 2026-08-24
+> mqvpn v0.16.0 + 3 パッチ + reinjection=off。nixpkgs 2026-08-22。
 
 ## 構成
 
 ```
-下流 (172.16.0.0/12) ──► ルーター
-  ルーター: ECMP デフォルトルート (フロー単位ハッシュで分割)
-    ├─ client mqvpn-0: tun mqvpn0, パス {eth2,eth4,eth5,eth6,eth7} ──► サーバーA (10.200.0.1:443,  192.168.0.0/24)
-    └─ client mqvpn-1: tun mqvpn1, パス {eth2,eth4,eth5,eth6,eth7} ──► サーバーB (10.200.0.1:4432, 192.168.1.0/24)
+下流クライアント (172.16.0.0/12, kea DHCP: IP/GW/DNS=172.16.0.1)
+  ──► ルーター (eth0): ECMP デフォルトルート (nhid グループ, フロー単位ハッシュ)
+        ├─ client mqvpn-0: tun mqvpn0, パス {eth1,eth3,eth4,eth5,eth6} ──► サーバーA (10.200.0.1:443,  192.168.0.0/24)
+        └─ client mqvpn-1: tun mqvpn1, パス {eth1,eth3,eth4,eth5,eth6} ──► サーバーB (10.200.0.1:4432, 192.168.1.0/24)
   サーバーは同じ VM 上に 2 プロセス (systemd: mqvpn-server / mqvpn-server-b)、
-  それぞれ NAT → SLiRP → internet。
+  復号後トラフィックを NAT (eth0) → ホスト (mq-mgmt-br0) → 実ネットワークへ (出口は
+  サーバーのみ — クライアント/ルーターはトンネル経由以外に外部経路を持たない)。
 ```
 
 - 実体: サーバー VM 1 台に 2 プロセス（ports 443/4432）。本番では別マシンに分割する運用を想定。
+- 管理ネットワーク (mq-mgmt-br0, 192.168.50.0/24): 全 VM の SSH 管理 + サーバーの出口。
+  SLiRP は不使用 (mgmt のデフォルトルートを VM 側に置かない → テスト経路の外への直抜けは構造的に不可能)。
+- DNS: クライアントは kea のオプション経由でルーター unbound (172.16.0.1) を参照。
+  unbound の forwarder (9.9.9.9 / 1.1.1.1) への再帰クエリも ECMP → トンネル → サーバー出口で実インターネットへ。
 - ルーターは `services.mqvpn.clientPorts = [ 443 4432 ]` で 2 クライアント (systemd: mqvpn-0 / mqvpn-1)
   を一様生成。サーバー IP (auth) と WAN NIC (interfaces) は共通、**port のみ**がクライアント間で異なる。
   `manage_routes = false` で mqvpn 側のルーティング操作を止め、`mqvpn-ecmp-assert` 常駐 unit
@@ -32,8 +37,11 @@
     `1000,1/1001,1`)、空グループは作成不可
   - **fail-open**: 全トンネル死亡時は WAN デフォルトを復元 (遷移時のみ成功ログ、
     失敗は毎ループログ — 古い GW は dhcpcd リースで自己修復)
-- NAT: ルーターは mark 方式 (eth1 入力で MARK) → `nixos-nat-post` に全トンネルの MASQUERADE。
-  FW は eth1→各 tun の FORWARD 許可を `networking.firewall.extraForwardRules` で生成。
+- NAT: ルーターは mark 方式 (eth0 入力で MARK) → `nixos-nat-post` に全トンネルの
+  mark ベース MASQUERADE (externalInterface 未設定のためモジュール総称ルールが併存するが、
+  明示のため extraCommands も残す — nixpkgs 更新で挙動が変わり得るため)。
+  FORWARD 許可は nat モジュールが生成する `-i eth0 -j ACCEPT` + FORWARD policy ACCEPT
+  (旧 `extraForwardRules` は nftables 専用オプションで iptables 実装では no-op だったため削除済み)。
 - パスの共有 (同一 NIC 5 本を 2 トンネルで分割利用) のスケジューリング影響は
   `chiken/mqvpn-ecmp-shared-paths.md` にて検証済み (劣化なし)。
 

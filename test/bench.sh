@@ -119,6 +119,21 @@ ensure_iperfd() {
   ssh_srv 'ss -tln | grep -q 6205 || iperf3 -s -p 6205 -D --logfile /tmp/iperf3-6205.log; echo iperfd-ok' >/dev/null 2>&1 || true
 }
 
+# --- サーバー側の戻りルート (172.16.0.0/12 → トンネル) ---
+# ルート無しでも返答は「入ってきたトンネル」経由で戻るが (route cache)、
+# その場合 1) 常に同一トンネルに固定され 2) トンネル死亡時に迷子になる。
+# 明示ルート (nhid グループ) で: ECMP 分散 (HP 2 トンネル)・カーネル自動縮退・
+# サーバー起点の送信もトンネル経由、が保証される。
+ensure_server_rt() {
+  ssh_srv 'sudo -n ip nexthop add id 1001 dev mqvpn0 2>/dev/null ||
+    sudo -n ip nexthop replace id 1001 dev mqvpn0 2>/dev/null
+sudo -n ip nexthop add id 1002 dev mqvpn1 2>/dev/null ||
+    sudo -n ip nexthop replace id 1002 dev mqvpn1 2>/dev/null
+sudo -n ip nexthop add id 4000 group 1001/1002 2>/dev/null ||
+    sudo -n ip nexthop replace id 4000 group 1001/1002 2>/dev/null
+sudo -n ip route replace 172.16.0.0/12 nhid 4000; echo rt-ok' >/dev/null 2>&1 || true
+}
+
 # --- クライアントの UDP 受信バッファ拡大 ---
 # 高レート測定 (特に RTT≈0 のラボ) では受信側ソケット溢れがロスに見えるため、
 # rmem を 64MB に拡大する (chiken/mqvpn-loss-investigation.md 参照)
@@ -136,7 +151,7 @@ case "$CMD" in
     ;;
   latency)
     MS="${1:-50}"; RATE="${2:-800}"; SEC="${3:-15}"; DIR="${4:-down}"
-    ensure_iperfd; ensure_rmem; ship_common; clear_netem; apply_uniform "$MS"
+    ensure_iperfd; ensure_server_rt; ensure_rmem; ship_common; clear_netem; apply_uniform "$MS"
     sleep 8
     ssh_cli "ping -c 2 -W 3 192.168.0.1 2>&1 | tail -1" 2>/dev/null | tail -1
     samp_start "$((SEC + 6))"
@@ -148,7 +163,7 @@ case "$CMD" in
     ;;
   hetero)
     RATE="${1:-800}"; SEC="${2:-15}"; DIR="${3:-down}"
-    ensure_iperfd; ensure_rmem; ship_common; clear_netem; apply_hetero
+    ensure_iperfd; ensure_server_rt; ensure_rmem; ship_common; clear_netem; apply_hetero
     sleep 8
     samp_start "$((SEC + 6))"
     out=$(run_udp "$RATE" "$DIR" "$SEC")
@@ -159,12 +174,12 @@ case "$CMD" in
     ;;
   multistream)
     N="${1:-10}"; SEC="${2:-20}"
-    ensure_iperfd; ensure_rmem; ship_common
+    ensure_iperfd; ensure_server_rt; ensure_rmem; ship_common
     "$SCRIPT_DIR/repro-cpu-saturation.sh" "$N" "$SEC"
     ;;
   profile)
     MS="${1:-50}"; RATE="${2:-800}"; SEC="${3:-15}"; DIR="${4:-down}"
-    ensure_iperfd; ensure_rmem; ship_common; clear_netem; apply_uniform "$MS"
+    ensure_iperfd; ensure_server_rt; ensure_rmem; ship_common; clear_netem; apply_uniform "$MS"
     sleep 8
     PERF=$(ssh_srv "command -v perf 2>/dev/null | tail -1")
     [ -n "$PERF" ] || { echo "perf not found on server"; exit 1; }

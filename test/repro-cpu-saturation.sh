@@ -22,6 +22,15 @@ PORT_BASE=5201
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+echo "=== step 0: サーバー側の戻りルートを確保 (172.16.0.0/12 → トンネル) ==="
+"$SCRIPT_DIR/ssh-server.sh" 'sudo -n ip nexthop add id 1001 dev mqvpn0 2>/dev/null ||
+  sudo -n ip nexthop replace id 1001 dev mqvpn0 2>/dev/null
+sudo -n ip nexthop add id 1002 dev mqvpn1 2>/dev/null ||
+  sudo -n ip nexthop replace id 1002 dev mqvpn1 2>/dev/null
+sudo -n ip nexthop add id 4000 group 1001/1002 2>/dev/null ||
+  sudo -n ip nexthop replace id 4000 group 1001/1002 2>/dev/null
+sudo -n ip route replace 172.16.0.0/12 nhid 4000 && echo rt-ok'
+
 echo "=== step 1: iperf3 server をサーバー VM に ${N} 本起動 (port ${PORT_BASE}-$((PORT_BASE + N - 1))) ==="
 "$SCRIPT_DIR/ssh-server.sh" "pkill -x iperf3 2>/dev/null; sleep 1; for p in \$(seq ${PORT_BASE} $((PORT_BASE + N - 1))); do iperf3 -s -p \$p -D -1 --logfile /tmp/iperf3-\$p.log; done; sleep 2; echo listening=\$(ss -tln | grep -cE ':(52[0-9]{2})')"
 

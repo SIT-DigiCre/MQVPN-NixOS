@@ -67,14 +67,32 @@ sudo ip link add mq-mgmt-br0 type bridge
 sudo ip link set mq-mgmt-br0 addr 02:00:00:50:00:01
 sudo ip addr add 192.168.50.254/24 dev mq-mgmt-br0 2>/dev/null || true
 sudo ip link set mq-mgmt-br0 up
-# 管理ブリッジから外部への抜けは構造的に禁止 (テスト経路の外に抜けないため)
-sudo sysctl -w net.ipv4.conf.mq-mgmt-br0.forwarding=0 >/dev/null
 for tap in tr-mgmt ts-mgmt tc-mgmt; do
   sudo ip tuntap add "$tap" mode tap user "$USER"
   sudo ip link set "$tap" master mq-mgmt-br0
   sudo ip link set "$tap" up
   echo "  $tap -> mq-mgmt-br0"
 done
+# サーバー (トンネル集約点) だけが上流へ抜けられる: forwarding + SNAT
+# 双方向とも -I (先頭挿入) — ホストの FORWARD に既存 DROP (Docker/firewalld 等) が
+# あっても前に挿入されるため片方向だけ通る事態を防ぐ。-A は後続 DROP の後になり
+# 戻りが落ちうる。許可は 192.168.50.2 (サーバー) 限定 — クライアント (192.168.50.3)
+# やルーター (192.168.50.1) が万一 mgmt 経由で送信しても実ネットワークへ出られない。
+echo "$(cat /proc/sys/net/ipv4/ip_forward)" > /tmp/mqvpn-ipforward 2>/dev/null || true
+sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null
+sudo sysctl -w net.ipv4.conf.mq-mgmt-br0.forwarding=1 >/dev/null
+realif=$(ip route get 8.8.8.8 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i=="dev") { print $(i+1); exit } }')
+if [ -n "$realif" ]; then
+  sudo iptables -t nat -C POSTROUTING -s 192.168.50.2 -o "$realif" -j MASQUERADE 2>/dev/null ||
+    sudo iptables -t nat -A POSTROUTING -s 192.168.50.2 -o "$realif" -j MASQUERADE
+  sudo iptables -C FORWARD -i mq-mgmt-br0 -s 192.168.50.2 -j ACCEPT 2>/dev/null ||
+    sudo iptables -I FORWARD -i mq-mgmt-br0 -s 192.168.50.2 -j ACCEPT
+  sudo iptables -C FORWARD -o mq-mgmt-br0 -d 192.168.50.2 -j ACCEPT 2>/dev/null ||
+    sudo iptables -I FORWARD -o mq-mgmt-br0 -d 192.168.50.2 -j ACCEPT
+  echo "  exit: 192.168.50.2 -> $realif (SNAT, FORWARD は .2 限定)"
+else
+  echo "  WARN: default route iface を特定できず、出口の転送設定はスキップ (server→internet 無効)"
+fi
 
 echo ""
 echo "=== done ==="
