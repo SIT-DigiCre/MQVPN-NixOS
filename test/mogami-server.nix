@@ -4,19 +4,17 @@
   ...
 }:
 let
-  # eth0: tap ts-mgmt → mq-mgmt-br0 (192.168.50.2/24, 管理 + 上流への出口)
-  # eth1: tap ts-mq → mqvpn-srv-br0 → router VM (10.200.0.0/24)
+  # eth0: ts-mgmt (管理 + 上流への出口) / eth1: ts-mq (router への 10.200.0.0/24)
+  # eth2: ts-ext (mnet VM 192.168.100.1 へのベンチ用出口)
   vmLanInterface = "eth1";
   vmWanInterface = "eth0";
-  # サーバー = トンネル集約点 (実機の VPN サーバー相当) で、上流への出口を持つ:
-  # トンネル復元後のトラフィックを NAT (eth0) → ホスト経由で実ネットワークへ。
-  # デフォルトルートはホスト (192.168.50.254)。ルーター/クライアントは出口を
-  # 持たないため、外部へは必ずトンネルを経由する (直抜け構造なし)。
   mqvpnServerSubnet = "192.168.0.0/24";
   mqvpnAuthKey = "mqvpn-test-key-2024";
   localIp = "10.200.0.1";
 
-  mqvpn = pkgs.callPackage ../pkgs/mqvpn-dbg.nix { };
+  mqvpnImage = (import ../container/mqvpn-server-image.nix { inherit pkgs; }).image;
+  mqvpnPromImage = (import ../container/mqvpn-prometheus-image.nix { inherit pkgs; }).image;
+  mqvpnGrafanaImage = (import ../container/mqvpn-grafana-image.nix { inherit pkgs; }).image;
 
   mqvpnCerts =
     pkgs.runCommand "mqvpn-certs"
@@ -31,14 +29,16 @@ let
         cp key.pem cert.pem $out/
       '';
 
+  # コンテナは /etc/mqvpn/ 配下を参照する
   mqvpnServerBase = {
     mode = "server";
     listen = "0.0.0.0:443";
     subnet = mqvpnServerSubnet;
     tun_name = "mqvpn0";
-    cert_file = "${mqvpnCerts}/cert.pem";
-    key_file = "${mqvpnCerts}/key.pem";
+    cert_file = "/etc/mqvpn/server.crt";
+    key_file = "/etc/mqvpn/server.key";
     auth_key = mqvpnAuthKey;
+    control_listen = "127.0.0.1:9090";
     log_level = "info";
     reinjection = "off";
     hybrid = {
@@ -48,29 +48,38 @@ let
     };
   };
 
-  mqvpnConfig = pkgs.writeText "mqvpn-server.json" (builtins.toJSON mqvpnServerBase);
+  # サーバー設定は 1 つの config を全インスタンスで共有する。
+  # 差別化は ENV (MQVPN_SUBNET) + ポートフォワードのみ (compose 側で表現)
+  mqvpnConf = pkgs.writeText "mqvpn-server.conf" (builtins.toJSON mqvpnServerBase);
 
-  # マルチサーバー構成用の 2 つ目のサーバー (ECMP 検証用)
-  # 同一 VM 内でポート 4432 / サブネット 192.168.1.0/24 / tun mqvpn1。差分のみ上書き。
-  mqvpnConfigB = pkgs.writeText "mqvpn-server-b.json" (
-    builtins.toJSON (
-      mqvpnServerBase
-      // {
-        listen = "0.0.0.0:4432";
-        subnet = "192.168.1.0/24";
-        tun_name = "mqvpn1";
-      }
-    )
-  );
+  # compose 一式を 1 つの store ディレクトリに固める (compose の相対パス解決のため)。
+  # prometheus / grafana は設定焼き込み済みの nix イメージを使うため、
+  # ここに必要なのは compose ファイル + サーバー設定のみ。
+  composeDir = pkgs.stdenv.mkDerivation {
+    name = "mqvpn-compose-dir";
+    phases = [ "installPhase" ];
+    installPhase = ''
+      mkdir -p $out/mqvpn-server-conf
+      cp ${../container/docker-compose.yml} $out/docker-compose.yml
+      cp -r ${mqvpnSrv}/* $out/mqvpn-server-conf/
+    '';
+  };
+
+  # compose がマウントするサーバー設定 (server.conf / server.crt / server.key) を store から供給
+  mqvpnSrv = pkgs.runCommand "mqvpn-srv" { } ''
+    mkdir -p $out
+    cp ${mqvpnConf} $out/server.conf
+    cp ${mqvpnCerts}/cert.pem $out/server.crt
+    cp ${mqvpnCerts}/key.pem $out/server.key
+  '';
 in
 {
   networking.hostName = lib.mkForce "mogami-server";
-  # NOTE: usePredictableInterfaceNames は VM ビルダーが boot.kernelParams に
-  # net.ifnames=0 を追加するため実質無効。interface 名は常に ethX になる。
+  # VM ビルダーが net.ifnames=0 を kernel param に足すため interface 名は常に ethX
 
   networking.useDHCP = false;
 
-  # eth0: mgmt (mq-mgmt-br0, SSH 管理専用・デフォルトルート無し)
+  # eth0: mgmt (SSH 管理) + 上流への出口 (defaultGateway でホスト経由)
   networking.interfaces."${vmWanInterface}" = {
     useDHCP = false;
     ipv4.addresses = [
@@ -91,19 +100,66 @@ in
     ];
   };
 
+  # eth2: ts-ext (mnet へのベンチ用出口)
+  networking.interfaces.eth2 = {
+    useDHCP = false;
+    ipv4.addresses = [
+      {
+        address = "192.168.100.2";
+        prefixLength = 24;
+      }
+    ];
+  };
+
+  # detect_iface は default route から出口 NIC を決める (無いと NAT が組まれない)
+  networking.defaultGateway = "192.168.50.254";
+  networking.nameservers = [ "1.1.1.1" ]; # compose のイメージ pull 用
+
   services.qemuGuest.enable = true;
 
-  # トンネル復元後のトラフィックを上流 (eth0 → ホスト) へ NAT
+  # net.* sysctl はコンテナから書けないためホスト側で有効化
   boot.kernel.sysctl."net.ipv4.ip_forward" = 1;
-  networking.nat = {
-    enable = true;
-    internalInterfaces = [
-      "mqvpn0"
-      "mqvpn1"
-    ];
-    externalInterface = vmWanInterface;
+
+  virtualisation.docker.enable = true;
+  virtualisation.docker.autoPrune.enable = true;
+  virtualisation.diskSize = 12288;
+
+  boot.kernelModules = [ "tun" ];
+  systemd.tmpfiles.rules = [ "c /dev/net/tun 0600 root root 10 200" ];
+
+  # 実環境と共通の compose をそのまま実行する。up はフォアグラウンド必須
+  # (-d だとユニットが終了扱いになり ExecStop の down が全コンテナを消す)
+  systemd.services = {
+    "mqvpn-compose" = {
+      description = "MQVPN servers + monitoring (docker compose)";
+      after = [
+        "docker.service"
+        "network-online.target"
+      ];
+      wants = [
+        "docker.service"
+        "network-online.target"
+      ];
+      wantedBy = [ "multi-user.target" ];
+
+      path = [
+        pkgs.docker
+        pkgs.docker-compose
+      ];
+
+      serviceConfig = {
+        ExecStartPre = [
+          "${pkgs.docker}/bin/docker load -i ${mqvpnImage}"
+          "${pkgs.docker}/bin/docker load -i ${mqvpnPromImage}"
+          "${pkgs.docker}/bin/docker load -i ${mqvpnGrafanaImage}"
+        ];
+        ExecStart = "${pkgs.docker-compose}/bin/docker-compose -f ${composeDir}/docker-compose.yml up --remove-orphans";
+        ExecStop = "${pkgs.docker-compose}/bin/docker-compose -f ${composeDir}/docker-compose.yml down";
+        Restart = "on-failure";
+        RestartSec = "10";
+      };
+    };
   };
-  networking.defaultGateway = "192.168.50.254";
 
   virtualisation.vmVariant = {
     virtualisation.graphics = false;
@@ -111,46 +167,11 @@ in
     virtualisation.qemu.networkingOptions = lib.mkForce [
       "-nic tap,ifname=ts-mgmt,script=no,downscript=no,model=virtio-net-pci,mac=52:54:00:12:34:58"
       "-nic tap,ifname=ts-mq,script=no,downscript=no,model=virtio-net-pci,mac=52:54:00:12:34:59"
+      "-nic tap,ifname=ts-ext,script=no,downscript=no,model=virtio-net-pci,mac=52:54:00:12:34:60"
     ];
   };
 
   hardware.enableRedistributableFirmware = false;
-
-  systemd.services.mqvpn-server = {
-    description = "MQVPN VPN Server A";
-    after = [ "network-online.target" ];
-    wants = [ "network-online.target" ];
-    wantedBy = [ "multi-user.target" ];
-
-    path = with pkgs; [
-      iproute2
-      iptables
-    ];
-
-    serviceConfig = {
-      ExecStart = "${mqvpn}/bin/mqvpn --config ${mqvpnConfig}";
-      Restart = "on-failure";
-      RestartSec = "5";
-    };
-  };
-
-  systemd.services.mqvpn-server-b = {
-    description = "MQVPN VPN Server B";
-    after = [ "network-online.target" ];
-    wants = [ "network-online.target" ];
-    wantedBy = [ "multi-user.target" ];
-
-    path = with pkgs; [
-      iproute2
-      iptables
-    ];
-
-    serviceConfig = {
-      ExecStart = "${mqvpn}/bin/mqvpn --config ${mqvpnConfigB}";
-      Restart = "on-failure";
-      RestartSec = "5";
-    };
-  };
 
   services.openssh = {
     enable = true;

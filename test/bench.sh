@@ -9,7 +9,8 @@ set -euo pipefail
 #
 # Usage:
 #   ./test/bench.sh clean
-#       ルーター WAN の netem を解除し、サーバーを標準サービス (ビルド時設定) に戻す
+#       ルーター WAN の netem を解除し、サーバー(compose の mqvpn-server-*)
+#       が停止していれば再起動する
 #
 #   ./test/bench.sh latency <delay_ms> [rate] [sec] [dir]
 #       ルーター WAN NIC 全てに均一 netem (遅延のみ, limit 100000)。
@@ -24,7 +25,8 @@ set -euo pipefail
 #
 #   ./test/bench.sh profile <delay_ms> [rate] [sec] [dir]
 #       netem 適用 + サーバー(send側) の perf record/report
-#       (要: サーバーが pkgs/mqvpn-dbg.nix ビルドのシンボル付きバイナリで動作)
+#       (OCI イメージ同梱のリリースバイナリ。ECMP 全コンテナの mqvpn を対象に
+#       するためシンボル注釈はバイナリ側に無い — 集計は [kernel]/[.] 単位)
 #       注意: perf の CPU 集計は dmesg/perf 権限が要るので sudo 使用 (サーバー側)
 # =============================================================================
 
@@ -46,16 +48,27 @@ ship_common() {
   local samp
   samp=$(cat << 'SAMP'
 #!/usr/bin/env bash
-pid=$(pgrep -x mqvpn | head -1)
-echo "sampling pid=$pid"
-prev_ut=$(awk "{print \$14}" /proc/$pid/stat)
-prev_st=$(awk "{print \$15}" /proc/$pid/stat)
+# サーバーは OCI コンテナ (ECMP で複数) — mqvpn プロセスを全 PID 合算する。
+# ホストの /proc にはコンテナプロセスも見えるため pgrep はホスト側で足りる。
+pids=$(pgrep -x mqvpn 2>/dev/null | tr '\n' ' ')
+[ -n "$pids" ] || { echo "no mqvpn process"; exit 0; }
+echo "sampling pids=$pids"
+sum_jiffies() { # f=14(utime)|15(stime)
+  local f="$1" s=0 p
+  for p in $pids; do
+    [ -r "/proc/$p/stat" ] || continue
+    s=$((s + $(awk "{print \$$f}" "/proc/$p/stat")))
+  done
+  echo "$s"
+}
+prev_ut=$(sum_jiffies 14)
+prev_st=$(sum_jiffies 15)
 i=0
 while [ "$i" -lt "${1:-30}" ]; do
   sleep 1
   i=$((i+1))
-  ut=$(awk "{print \$14}" /proc/$pid/stat)
-  st=$(awk "{print \$15}" /proc/$pid/stat)
+  ut=$(sum_jiffies 14)
+  st=$(sum_jiffies 15)
   d_j=$(( (ut + st) - (prev_ut + prev_st) ))
   echo "t=${i}s jiffies/s=${d_j}"
   prev_ut=$ut
@@ -108,31 +121,41 @@ samp_max() { # $1=host S|R
 }
 
 # --- iperf3 ---
+# ターゲット: 既定は mnet VM (フルチェーン計測 — ルーターの ECMP が
+# 自動で A/B 両サーバーへフローを振り分ける)。
+# BENCH_TARGET=192.168.0.1 でトンネル peer 宛の従来計測も可能 (非推奨)。
+TARGET="${BENCH_TARGET:-192.168.100.1}"
+
+# サーバーコンテナ名を動的解決 (mqvpn-server-N のハードコードを避ける)
+SRV_CTR=$("$SCRIPT_DIR/ssh-server.sh" 'sudo docker ps --filter name=mqvpn-server --format "{{.Names}}" | head -1' 2>/dev/null | tr -d '\r')
+SRV_CTR="${SRV_CTR:-mqvpn-server-0}"
+
+ensure_iperfd_mnet() {
+  # 172.17.0.0/16 (docker0) への戻りルートは mogami-mnet.nix で静的に宣言済み。
+  # トンネル (tun mtu 1382) より大きいデータグラムは frag-needed ICMP で
+  # iperf3 の送信が abort する (初回 DOWN 0/0 の根本原因) —
+  # mnet の MTU をコンテナの tun MTU に合わせ、PMTU 学習に依存しないようにする
+  # (UDP のみの暫定対応。根本解決は TCP MSS clamp / 正しい route MTU の設定)。
+  TUN_MTU=$("$SCRIPT_DIR/ssh-server.sh" "sudo docker exec $SRV_CTR cat /sys/class/net/mqvpn0/mtu" 2>/dev/null | tail -1)
+  if [ -n "$TUN_MTU" ] && [ "$TUN_MTU" -gt 0 ] 2>/dev/null; then
+    "$SCRIPT_DIR/ssh-mnet.sh" "sudo -n ip link set eth0 mtu $TUN_MTU" >/dev/null 2>&1
+  fi
+  "$SCRIPT_DIR/ssh-mnet.sh" 'for p in 6205 $(seq 5201 5300); do ss -tln | grep -q $p || iperf3 -s -p $p -D --logfile /tmp/i3-$p.log 2>/dev/null; done; echo iperfd-mnet-ok' >/dev/null 2>&1 || true
+}
+
 run_udp() { # rate dir sec
   local rate="$1" dir="$2" sec="$3"
   local flag=""
   [ "$dir" = "down" ] && flag="-R"
-  ssh_cli "iperf3 -c 192.168.0.1 -p 6205 -u ${flag} -b ${rate}M -t ${sec} -f m 2>&1 | grep receiver | tail -1" 2>/dev/null | tail -1
+  ssh_cli "iperf3 -c $TARGET -p 6205 -u ${flag} -b ${rate}M -t ${sec} -f m 2>&1 | grep receiver | tail -1" 2>/dev/null | tail -1
 }
 
-ensure_iperfd() {
-  ssh_srv 'ss -tln | grep -q 6205 || iperf3 -s -p 6205 -D --logfile /tmp/iperf3-6205.log; echo iperfd-ok' >/dev/null 2>&1 || true
-}
 
-# --- サーバー側の戻りルート (172.16.0.0/12 → トンネル) ---
-# ルート無しでも返答は「入ってきたトンネル」経由で戻るが (route cache)、
-# その場合 1) 常に同一トンネルに固定され 2) トンネル死亡時に迷子になる。
-# 明示ルート (nhid グループ) で: ECMP 分散 (HP 2 トンネル)・カーネル自動縮退・
-# サーバー起点の送信もトンネル経由、が保証される。
-ensure_server_rt() {
-  ssh_srv 'sudo -n ip nexthop add id 1001 dev mqvpn0 2>/dev/null ||
-    sudo -n ip nexthop replace id 1001 dev mqvpn0 2>/dev/null
-sudo -n ip nexthop add id 1002 dev mqvpn1 2>/dev/null ||
-    sudo -n ip nexthop replace id 1002 dev mqvpn1 2>/dev/null
-sudo -n ip nexthop add id 4000 group 1001/1002 2>/dev/null ||
-    sudo -n ip nexthop replace id 4000 group 1001/1002 2>/dev/null
-sudo -n ip route replace 172.16.0.0/12 nhid 4000; echo rt-ok' >/dev/null 2>&1 || true
-}
+# --- サーバー→クライアント実IP への戻りルートは intentionally 付けない ---
+# ルーター側 NAPT(MASQUERADE) のため復路宛先はトンネル端点(192.168.0.2)となり、
+# サーバーの 192.168.0.0/24 connected route で足りる。戻りルート(172.16.0.0/12)
+# は NAPT 構成では不要(過去の SLiRP 環境限定シナリオ)。DOWN 計測は mnet
+# (192.168.100.1) 宛をクライアントから -R で打ち、NAPT 互換の流れで行う。
 
 # --- クライアントの UDP 受信バッファ拡大 ---
 # 高レート測定 (特に RTT≈0 のラボ) では受信側ソケット溢れがロスに見えるため、
@@ -147,13 +170,15 @@ CMDRUN="latency|hetero|multistream|profile|clean"
 case "$CMD" in
   clean)
     clear_netem
-    ssh_srv 'pgrep -x mqvpn >/dev/null && echo running || { sudo -n systemctl start mqvpn-server; sleep 3; echo restarted; }' 2>/dev/null | tail -1
+    # サーバーは compose (mqvpn-compose unit) が管理するコンテナ群。
+    # 稼働判定/再起動は docker 経由にする (旧 systemd 直起動は廃止)
+    ssh_srv 'sudo -n docker ps --filter name=mqvpn-server --format "{{.Names}}" | grep -q . && echo running || { sudo -n systemctl restart mqvpn-compose; sleep 3; echo restarted; }' 2>/dev/null | tail -1
     ;;
   latency)
     MS="${1:-50}"; RATE="${2:-800}"; SEC="${3:-15}"; DIR="${4:-down}"
-    ensure_iperfd; ensure_server_rt; ensure_rmem; ship_common; clear_netem; apply_uniform "$MS"
+    ensure_iperfd_mnet; ensure_rmem; ship_common; clear_netem; apply_uniform "$MS"
     sleep 8
-    ssh_cli "ping -c 2 -W 3 192.168.0.1 2>&1 | tail -1" 2>/dev/null | tail -1
+    ssh_cli "ping -c 2 -W 3 $TARGET 2>&1 | tail -1" 2>/dev/null | tail -1
     samp_start "$((SEC + 6))"
     out=$(run_udp "$RATE" "$DIR" "$SEC")
     sleep 1
@@ -163,7 +188,7 @@ case "$CMD" in
     ;;
   hetero)
     RATE="${1:-800}"; SEC="${2:-15}"; DIR="${3:-down}"
-    ensure_iperfd; ensure_server_rt; ensure_rmem; ship_common; clear_netem; apply_hetero
+    ensure_iperfd_mnet; ensure_rmem; ship_common; clear_netem; apply_hetero
     sleep 8
     samp_start "$((SEC + 6))"
     out=$(run_udp "$RATE" "$DIR" "$SEC")
@@ -174,17 +199,19 @@ case "$CMD" in
     ;;
   multistream)
     N="${1:-10}"; SEC="${2:-20}"
-    ensure_iperfd; ensure_server_rt; ensure_rmem; ship_common
+    ensure_iperfd_mnet; ensure_rmem; ship_common
     "$SCRIPT_DIR/repro-cpu-saturation.sh" "$N" "$SEC"
     ;;
   profile)
     MS="${1:-50}"; RATE="${2:-800}"; SEC="${3:-15}"; DIR="${4:-down}"
-    ensure_iperfd; ensure_server_rt; ensure_rmem; ship_common; clear_netem; apply_uniform "$MS"
+    ensure_iperfd_mnet; ensure_rmem; ship_common; clear_netem; apply_uniform "$MS"
     sleep 8
     PERF=$(ssh_srv "command -v perf 2>/dev/null | tail -1")
     [ -n "$PERF" ] || { echo "perf not found on server"; exit 1; }
     PERFDATA=/tmp/perf.data
-    ssh_srv "rm -f ${PERFDATA}; sudo -n bash -c 'nohup ${PERF} record -F 99 -e cpu-clock -g -p \$(pgrep -x mqvpn) -o ${PERFDATA} -- sleep $((SEC + 4)) >/tmp/perf-record.log 2>&1 &'" >/dev/null 2>&1
+    # ECMP で複数コンテナに分散 → 全 mqvpn プロセスを対象に (ホスト perf は
+    # コンテナプロセスへホスト PID でアタッチできる)
+    ssh_srv "rm -f ${PERFDATA}; sudo -n bash -c 'p=\$(pgrep -x mqvpn | paste -sd, -); [ -n \"\$p\" ] || { echo no-mqvpn >/tmp/perf-record.log; exit 1; }; nohup ${PERF} record -F 99 -e cpu-clock -g -p \$p -o ${PERFDATA} -- sleep $((SEC + 4)) >/tmp/perf-record.log 2>&1 &'" >/dev/null 2>&1
     out=$(run_udp "$RATE" "$DIR" "$SEC")
     sleep 5
     echo "== profile ${DIR} ${RATE}M @ ${MS}ms =="

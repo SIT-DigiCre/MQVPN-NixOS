@@ -12,4 +12,4 @@ echo "  Mgmt      : tr-mgmt -> mq-mgmt-br0 "
 echo ""
 
 # NIC は全て test/mogami-vm.nix の networkingOptions (mkForce) で定義。
-exec "$ROUTER_VM" -smp 4
+exec "$ROUTER_VM" -smp 2

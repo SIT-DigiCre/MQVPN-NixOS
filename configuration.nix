@@ -54,7 +54,7 @@ in
 
   options.services.mqvpn.clientPorts = lib.mkOption {
     type = lib.types.listOf lib.types.port;
-    default = [ 443 ];
+    default = [ 443 444 ];
     description = ''
       クライアントの接続先 server port リスト。サーバー IP (auth.server_addr) と
       WAN NIC (interfaces) は全クライアント共通のため、port のみ個別指定する。
@@ -215,6 +215,15 @@ description = "MQVPN hybrid TCP lane config";
           '') mqvpnClientConfigs
         );
       };
+
+      # トンネル MTU(1382) 超の TCP セグメントはトンネル内で IP フラグメント化され、
+      # オーバーヘッド/フラグメントロスで数割劣化する。FORWARD で MSS を出口 IF の
+      # PMTU にクランプし、断片化を事前回避する (SLiRP 等 ICMP が戻らない環境では
+      # 完全ブラックホールを防ぐ保険にもなる)。
+      networking.firewall.extraCommands = ''
+        iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
+        iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+      '';
 
       # ---------------------------------------------------------------------
       # 4. LAN側：DHCP/DNSサーバー

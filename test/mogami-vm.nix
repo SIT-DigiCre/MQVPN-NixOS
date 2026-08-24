@@ -86,7 +86,7 @@ in {
   services.mqvpn.interfaces = vmWanInterfaces;
 
   # クライアントは port リストで定義 (IP は auth.server_addr、WAN NIC は interfaces)
-  services.mqvpn.clientPorts = [ 443 4432 ];
+  services.mqvpn.clientPorts = [ 443 444 ];
 
   services.openssh.settings.PasswordAuthentication = lib.mkForce true;
 

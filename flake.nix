@@ -28,6 +28,34 @@
     {
       formatter.x86_64-linux = nixpkgs.legacyPackages.x86_64-linux.nixpkgs-fmt;
 
+      packages.x86_64-linux =
+        let
+          pkgs = nixpkgs.legacyPackages.x86_64-linux;
+          mqvpnServerOci = import ./container/mqvpn-server-image.nix { inherit pkgs; };
+          mqvpnPrometheusOci = import ./container/mqvpn-prometheus-image.nix { inherit pkgs; };
+          mqvpnGrafanaOci = import ./container/mqvpn-grafana-image.nix { inherit pkgs; };
+          # 3 イメージを 1 つのバンドルにまとめる (ビルド/ロードを 1 コマンドに)。
+          # 出力ディレクトリに各 tar への symlink と、docker load 一括スクリプトを置く。
+          mqvpnOciBundle = pkgs.runCommand "mqvpn-oci-bundle" { } ''
+            mkdir -p $out
+            ln -s ${mqvpnServerOci.image} $out/mqvpn-server.tar
+            ln -s ${mqvpnPrometheusOci.image} $out/mqvpn-prometheus.tar
+            ln -s ${mqvpnGrafanaOci.image} $out/mqvpn-grafana.tar
+            cat > $out/load-all.sh <<'EOF'
+            #!/bin/sh
+            d=$(cd "$(dirname "$0")" && pwd)
+            for f in mqvpn-server.tar mqvpn-prometheus.tar mqvpn-grafana.tar; do
+              docker load -i "$d/$f" || exit 1
+            done
+            echo "mqvpn OCI images loaded"
+            EOF
+            chmod +x $out/load-all.sh
+          '';
+        in
+        {
+          mqvpn-oci = mqvpnOciBundle;
+        };
+
       nixosConfigurations = {
         iso = nixpkgs.lib.nixosSystem {
           system = "x86_64-linux";
@@ -92,6 +120,12 @@
           system = "x86_64-linux";
           modules = [
             ./test/mogami-server.nix
+          ] ++ commonModules;
+        };
+        mogami-mnet = nixpkgs.lib.nixosSystem {
+          system = "x86_64-linux";
+          modules = [
+            ./test/mogami-mnet.nix
           ] ++ commonModules;
         };
       };

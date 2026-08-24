@@ -13,7 +13,12 @@ set -euo pipefail
 #
 # 出力:
 #   - クライアントごとのスループット (Mbit/s) と合計
-#   - サーバー VM の mqvpn プロセス CPU (jiffies/s) — 100 = 1コア飽和
+#
+# 前提:
+#   - mnet VM に iperfd が常駐 (bench.sh の ensure_iperfd_mnet で起動)
+#   - サーバー→クライアント実IP の戻りルートは不要（ルーター NAPT のため復路は
+#     トンネル端点宛。サーバーの 192.168.0.0/24 connected route で足りる）
+#   - サーバー mqvpn の CPU 負荷は `docker stats` で確認
 # =============================================================================
 
 N=${1:-10}
@@ -22,58 +27,18 @@ PORT_BASE=5201
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo "=== step 0: サーバー側の戻りルートを確保 (172.16.0.0/12 → トンネル) ==="
-"$SCRIPT_DIR/ssh-server.sh" 'sudo -n ip nexthop add id 1001 dev mqvpn0 2>/dev/null ||
-  sudo -n ip nexthop replace id 1001 dev mqvpn0 2>/dev/null
-sudo -n ip nexthop add id 1002 dev mqvpn1 2>/dev/null ||
-  sudo -n ip nexthop replace id 1002 dev mqvpn1 2>/dev/null
-sudo -n ip nexthop add id 4000 group 1001/1002 2>/dev/null ||
-  sudo -n ip nexthop replace id 4000 group 1001/1002 2>/dev/null
-sudo -n ip route replace 172.16.0.0/12 nhid 4000 && echo rt-ok'
+TARGET="${BENCH_TARGET:-192.168.100.1}"
 
-echo "=== step 1: iperf3 server をサーバー VM に ${N} 本起動 (port ${PORT_BASE}-$((PORT_BASE + N - 1))) ==="
-"$SCRIPT_DIR/ssh-server.sh" "pkill -x iperf3 2>/dev/null; sleep 1; for p in \$(seq ${PORT_BASE} $((PORT_BASE + N - 1))); do iperf3 -s -p \$p -D -1 --logfile /tmp/iperf3-\$p.log; done; sleep 2; echo listening=\$(ss -tln | grep -cE ':(52[0-9]{2})')"
-
-echo "=== step 2: サーバー VM の mqvpn CPU サンプラを起動 ==="
-"$SCRIPT_DIR/ssh-server.sh" 'cat > /tmp/cpusamp.sh << "SAMPLER"
-#!/usr/bin/env bash
-pid=$(pgrep -x mqvpn | head -1)
-echo "sampling pid=$pid"
-prev_ut=$(awk "{print \$14}" /proc/$pid/stat)
-prev_st=$(awk "{print \$15}" /proc/$pid/stat)
-prev_sys=$(awk "{s=\$1+\$2+\$3+\$4+\$5+\$6+\$7+\$8} END{print s}" /proc/stat)
-i=0
-while [ "$i" -lt "${1:-30}" ]; do
-  sleep 1
-  i=$((i+1))
-  ut=$(awk "{print \$14}" /proc/$pid/stat)
-  st=$(awk "{print \$15}" /proc/$pid/stat)
-  sys=$(awk "{s=\$1+\$2+\$3+\$4+\$5+\$6+\$7+\$8} END{print s}" /proc/stat)
-  d_j=$(( (ut + st) - (prev_ut + prev_st) ))
-  d_s=$(( sys - prev_sys ))
-  echo "t=${i}s jiffies/s=${d_j}"
-  prev_ut=$ut
-  prev_st=$st
-  prev_sys=$sys
-done
-SAMPLER
-chmod +x /tmp/cpusamp.sh
-rm -f /tmp/cpu.log
-nohup /tmp/cpusamp.sh '"$((DUR + 6))"' > /tmp/cpu.log 2>&1 &
-echo sampler-started'
-
-echo "=== step 3: クライアント VM から ${N} 並列で iperf3 実行 (${DUR}s) ==="
+echo "=== ${N} 並列 iperf3 → ${TARGET} (${DUR}s, ルーター ECMP が A/B 両トンネルへ自動振り分け) ==="
 "$SCRIPT_DIR/ssh-client.sh" "rm -f /tmp/ip_*.json /tmp/ip_*.err
-for p in \$(seq ${PORT_BASE} $((PORT_BASE + N - 1))); do
-  (iperf3 -c 192.168.0.1 -p \$p -t ${DUR} --json > /tmp/ip_\$p.json 2>/tmp/ip_\$p.err) &
+for i in \$(seq 1 ${N}); do
+  p=\$((i + ${PORT_BASE} - 1))
+  (iperf3 -c ${TARGET} -p \$p -t ${DUR} --json > /tmp/ip_\$p.json 2>/tmp/ip_\$p.err) &
 done
 wait
-for p in \$(seq ${PORT_BASE} $((PORT_BASE + N - 1))); do
+for i in \$(seq 1 ${N}); do
+  p=\$((i + ${PORT_BASE} - 1))
   b=\$(jq -r \".end.sum_sent.bits_per_second // 0\" /tmp/ip_\$p.json 2>/dev/null)
-  printf \"client %2d: %.0f Mbit/s\\n\" \$((p - ${PORT_BASE} + 1)) \$(awk -v v=\$b \"BEGIN{printf \\\"%.1f\\\", v/1e6}\")
+  printf \"client %2d: %.0f Mbit/s\\n\" \$i \$(awk -v v=\$b \"BEGIN{printf \\\"%.1f\\\", v/1e6}\")
 done
 jq -s \"[.[] | .end.sum_sent.bits_per_second // 0] | {total_mbit_s: (add/1e6), clients_with_data: ([.[]|select(.>0)]|length)}\" /tmp/ip_*.json"
-
-echo "=== step 4: サーバー mqvpn CPU ログ (100 jiffies/s = 1コア飽和) ==="
-sleep 1
-"$SCRIPT_DIR/ssh-server.sh" "cat /tmp/cpu.log"

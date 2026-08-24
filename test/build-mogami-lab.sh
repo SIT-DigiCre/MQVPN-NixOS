@@ -28,12 +28,19 @@ nix build "path:$REPO_DIR#nixosConfigurations.mogami-client.config.system.build.
   --out-link /tmp/result-client --print-build-logs
 ln -sf /tmp/result-client "$SCRIPT_DIR/result-client" 2>/dev/null || true
 
+echo "=== building mogami-mnet ==="
+rm -rf "$SCRIPT_DIR/result-mnet" 2>/dev/null || true
+nix build "path:$REPO_DIR#nixosConfigurations.mogami-mnet.config.system.build.vm" \
+  --out-link /tmp/result-mnet --print-build-logs
+ln -sf /tmp/result-mnet "$SCRIPT_DIR/result-mnet" 2>/dev/null || true
+
 echo "=== cleanup stale interfaces ==="
-for tap in trw0 trw1 trw2 trw3 trw4 ts-mq tr-mgmt ts-mgmt tc-mgmt; do
+for tap in trw0 trw1 trw2 trw3 trw4 ts-mq tr-mgmt ts-mgmt tc-mgmt tm-ext ts-ext tm-mgmt; do
   sudo ip link delete "$tap" 2>/dev/null || true
 done
 sudo ip link delete mqvpn-srv-br0 2>/dev/null || true
 sudo ip link delete mq-mgmt-br0 2>/dev/null || true
+sudo ip link delete mq-ext-br0 2>/dev/null || true
 sudo ip link delete $TAP_CLIENT 2>/dev/null || true
 sudo ip link delete $TAP_ROUTER 2>/dev/null || true
 sudo ip link delete $BRIDGE 2>/dev/null || true
@@ -67,7 +74,7 @@ sudo ip link add mq-mgmt-br0 type bridge
 sudo ip link set mq-mgmt-br0 addr 02:00:00:50:00:01
 sudo ip addr add 192.168.50.254/24 dev mq-mgmt-br0 2>/dev/null || true
 sudo ip link set mq-mgmt-br0 up
-for tap in tr-mgmt ts-mgmt tc-mgmt; do
+for tap in tr-mgmt ts-mgmt tc-mgmt tm-mgmt; do
   sudo ip tuntap add "$tap" mode tap user "$USER"
   sudo ip link set "$tap" master mq-mgmt-br0
   sudo ip link set "$tap" up
@@ -94,8 +101,20 @@ else
   echo "  WARN: default route iface を特定できず、出口の転送設定はスキップ (server→internet 無効)"
 fi
 
+echo "=== creating ext bridge (mnet 用): mq-ext-br0 (192.168.100.0/24, 純ラボ島) ==="
+sudo ip link add mq-ext-br0 type bridge
+sudo ip link set mq-ext-br0 addr 02:00:00:50:00:02
+sudo ip link set mq-ext-br0 up
+for tap in tm-ext ts-ext; do
+  sudo ip tuntap add "$tap" mode tap user "$USER"
+  sudo ip link set "$tap" master mq-ext-br0
+  sudo ip link set "$tap" up
+  echo "  $tap -> mq-ext-br0"
+done
+
 echo ""
 echo "=== done ==="
 echo "WAN: 5x tap via mqvpn-srv-br0 -> server VM (10.200.0.1)"
 echo "LAN: $TAP_ROUTER + $TAP_CLIENT via $BRIDGE (172.16.0.0/12)"
-echo "Mgmt: 3x tap via mq-mgmt-br0 (192.168.50.1 router / .2 server / .3 client)"
+echo "Mgmt: 4x tap via mq-mgmt-br0 (192.168.50.1 router / .2 server / .3 client / .4 mnet)"
+echo "Ext: tm-ext + ts-ext via mq-ext-br0 (192.168.100.1 mnet / .2 server)"

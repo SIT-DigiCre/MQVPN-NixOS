@@ -1,0 +1,83 @@
+# 1 サーバ = 1 コンテナ。config は全インスタンスで同一ファイルをマウントする。
+# サーバー間の違いはポートフォワード + ENV のみ:
+#  - MQVPN_SUBNET: 仮想サブネットの上書き。同一ホストでクライアントインスタンス
+#    を複数立ち上げ (ECMP) する運用のみ。subnet の重複はカーネルが許容するため
+#    実用上問題ないが、ラボは曖昧さ回避のためサーバーごとに分けて運用。
+#    各サーバーが別クライアントを受ける通常運用では設定不要。tun_name は
+#    netns 分離により全インスタンス同一でよい
+#
+# 【サーバーの増やし方】mqvpn-server-2 を追加する:
+#   - 新サービスの `ports` と MQVPN_SUBNET を変え、`<<: *mqvpn-server` で
+#     boilerplate を継承するだけ
+#   - prometheus の scrape target は nix ビルド時に compose から自動生成される
+#     ため (mqvpn-oci)、compose の編集だけで済む
+#   - Grafana は自動対応 (Server 変数が label_values で新インスタンスを拾う)
+#
+# メトリクス・監視:
+#  - 設定は焼き込む(nix 由来)が、書込み先 (prometheus の TSDB / grafana.db) は
+#    named volume で永続化する。無名 volume だと --force-recreate や compose down
+#    のたびに履歴・設定が消える
+#  - grafana は provisioning でデータソースとダッシュボードが自動登録される
+#    (http://<host>:3000, admin/…)。ダッシュボード JSON はビルド時に上流から
+#    取得・変換されてイメージに焼き込まれるため、手動インポートは不要
+#  - Grafana の admin パスワードは平文 "admin" で渡し、初回ログイン時に変更する
+#    (ラボ/デモ用途。本番では初回ログインで必ず変更すること)
+
+x-mqvpn-server: &mqvpn-server
+  image: mqvpn-server:latest
+  restart: unless-stopped
+  devices:
+    - /dev/net/tun:/dev/net/tun
+  cap_drop:
+    - ALL
+  cap_add:
+    - NET_ADMIN
+    - NET_BIND_SERVICE
+  volumes:
+    - ./mqvpn-server-conf/server.conf:/etc/mqvpn/server.conf:ro
+    - ./mqvpn-server-conf/server.crt:/etc/mqvpn/server.crt:ro
+    - ./mqvpn-server-conf/server.key:/etc/mqvpn/server.key:ro
+
+services:
+  mqvpn-server-0:
+    <<: *mqvpn-server
+    container_name: mqvpn-server-0
+    environment:
+      - MQVPN_SUBNET=192.168.0.0/24
+    ports:
+      - "443:443/tcp"
+      - "443:443/udp"
+
+  mqvpn-server-1:
+    <<: *mqvpn-server
+    container_name: mqvpn-server-1
+    environment:
+      - MQVPN_SUBNET=192.168.1.0/24
+    ports:
+      - "444:443/tcp"
+      - "444:443/udp"
+
+  prometheus:
+    image: mqvpn-prometheus:latest
+    container_name: prometheus
+    restart: unless-stopped
+    volumes:
+      - prometheus-data:/prometheus
+
+  grafana:
+    image: mqvpn-grafana:latest
+    container_name: grafana
+    restart: unless-stopped
+    volumes:
+      - grafana-data:/var/lib/grafana
+    environment:
+      # 初回ログイン時に必ず変更すること。
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_PATHS_PROVISIONING=/etc/grafana/provisioning
+    ports:
+      - "3000:3000/tcp"
+
+volumes:
+  prometheus-data: {}
+  grafana-data: {}

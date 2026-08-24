@@ -5,10 +5,17 @@ echo "=== cleanup ==="
 pkill -f "qemu-system-x86_64.*mogami-vm" 2>/dev/null && echo "killed router VM" || true
 pkill -f "qemu-system-x86_64.*mogami-server" 2>/dev/null && echo "killed server VM" || true
 pkill -f "qemu-system-x86_64.*mogami-client" 2>/dev/null && echo "killed client VM" || true
+pkill -f "qemu-system-x86_64.*mogami-mnet" 2>/dev/null && echo "killed mnet VM" || true
 
 echo "=== removing server bridge + taps ==="
 sudo ip link delete mqvpn-srv-br0 2>/dev/null || true
 for tap in trw0 trw1 trw2 trw3 trw4 ts-mq; do
+  sudo ip link delete "$tap" 2>/dev/null || true
+done
+
+echo "=== removing ext bridge (mnet) + taps ==="
+sudo ip link delete mq-ext-br0 2>/dev/null || true
+for tap in tm-ext ts-ext tm-mgmt; do
   sudo ip link delete "$tap" 2>/dev/null || true
 done
 

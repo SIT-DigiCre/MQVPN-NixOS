@@ -9,4 +9,4 @@ echo "  TestIF  : tc-mq -> mqvpn-br0 -> router (172.16.0.2/12)"
 echo "  Mgmt    : tc-mgmt -> mq-mgmt-br0 "
 echo ""
 
-exec "$CLIENT_VM" -smp 4
+exec "$CLIENT_VM" -smp 2

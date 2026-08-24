@@ -9,4 +9,4 @@ echo "  WAN  : ts-mq -> mqvpn-srv-br0 -> router VM"
 echo "  Mgmt : ts-mgmt -> mq-mgmt-br0 "
 echo ""
 
-exec "$SERVER_VM" -smp 4
+exec "$SERVER_VM" -smp 2

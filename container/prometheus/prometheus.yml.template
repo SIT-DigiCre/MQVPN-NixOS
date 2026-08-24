@@ -1,0 +1,19 @@
+# Prometheus: mqvpn exporter の /metrics を収集する。
+# このファイルは mqvpn-oci (nix イメージバンドル) のテンプレートで、
+# mqvpn job の targets はビルド時に compose の mqvpn-server-* サービス名から
+# 自動生成・焼き込みされる (サーバー追加が compose 1 カ所で済む)。
+# 下記 targets は見本 (スタンドアロンで image を自作する場合の記入例)。
+# exporter の -mqvpn.scrape-budget=25s (制御 API は高負荷時に秒単位へ劣化) に
+# 合わせ、timeout は 30s に余裕を持たせる
+global:
+  scrape_interval: 30s
+  scrape_timeout: 30s
+
+scrape_configs:
+  - job_name: mqvpn
+    static_configs:
+      - targets:
+          - "mqvpn-server-0:9091"
+          - "mqvpn-server-1:9091"
+        labels:
+          stack: mqvpn

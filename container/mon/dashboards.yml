@@ -1,0 +1,11 @@
+apiVersion: 1
+providers:
+  - name: mqvpn
+    type: file
+    options:
+      # /var/lib/grafana は grafana の書込み先 (grafana.db 等) なので焼き込みレイヤ
+      # が所有者を上書きしないよう、ダッシュボードは /etc/grafana 配下に置く
+      path: /etc/grafana/dashboards
+      foldersFromFilesStructure: false
+    disableDeletion: true
+    allowUiUpdates: false
