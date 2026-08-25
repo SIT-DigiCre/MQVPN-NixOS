@@ -19,8 +19,10 @@
 推奨 (flake が既定で有効):
 
 ```sh
-curl -sSfL https://artifacts.nixos.org/nix-installer | sh -s -- install
+curl -sSfL https://artifacts.nixos.org/nix-installer | sudo sh -s -- install --enable-flakes --no-confirm
 ```
+
+シェルを開き直す
 
 確認:
 
@@ -78,7 +80,6 @@ sudo modprobe tun
 ls -l /dev/net/tun   # 存在すれば OK
 
 # ファイアウォール (例: ufw) — 443 を開放
-sudo ufw allow 443/tcp
 sudo ufw allow 443/udp
 ```
 

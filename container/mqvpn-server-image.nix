@@ -152,7 +152,6 @@ let
         "${entrypointLayer}/mqvpn-oci-entrypoint"
       ];
       ExposedPorts = {
-        "443/tcp" = { };
         "443/udp" = { };
       };
       Volumes = {

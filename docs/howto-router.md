@@ -15,8 +15,10 @@ ISO のビルドは別マシン（Nix 入り）で行い、USB メモリ経由�
 推奨 (flake が既定で有効):
 
 ```sh
-curl -sSfL https://artifacts.nixos.org/nix-installer | sh -s -- install
+curl -sSfL https://artifacts.nixos.org/nix-installer | sudo sh -s -- install --enable-flakes --no-confirm
 ```
+
+シェルを開き直す
 
 確認:
 

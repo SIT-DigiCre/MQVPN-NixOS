@@ -45,7 +45,6 @@ services:
     environment:
       - MQVPN_SUBNET=192.168.0.0/24
     ports:
-      - "443:443/tcp"
       - "443:443/udp"
 
   mqvpn-server-1:
@@ -54,7 +53,6 @@ services:
     environment:
       - MQVPN_SUBNET=192.168.1.0/24
     ports:
-      - "444:443/tcp"
       - "444:443/udp"
 
   prometheus:
