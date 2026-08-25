@@ -11,6 +11,7 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONF_DIR="${1:-./mqvpn-server-conf}"
 
 if [ -e "$CONF_DIR/server.conf" ]; then
@@ -28,8 +29,17 @@ openssl req -new -x509 -key "$CONF_DIR/server.key" -out "$CONF_DIR/server.crt" \
   -days 3650 -subj "/CN=$CN" \
   -addext "subjectAltName=DNS:$CN,IP:127.0.0.1"
 
-# 認証キー (32バイト → base64, mqvpn --genkey と同等。クライアントと共有)
-AUTH_KEY=$(head -c 32 /dev/urandom | base64 | tr -d '\n')
+# 認証キー: クライアントと共有するため、mqvpn-auth.json にあればそれを流用し、
+# 無ければ生成して mqvpn-auth.json に書き出す (server/client で一致させる)
+AUTH_JSON="${SCRIPT_DIR}/../mqvpn-auth.json"
+if [ -f "$AUTH_JSON" ]; then
+  AUTH_KEY=$(jq -r '.auth_key' "$AUTH_JSON")
+fi
+if [ -z "${AUTH_KEY:-}" ] || [ "$AUTH_KEY" = "null" ]; then
+  AUTH_KEY=$(head -c 32 /dev/urandom | base64 | tr -d '\n')
+  echo "{\"server_addr\": \"\", \"auth_key\": \"$AUTH_KEY\"}" > "$AUTH_JSON"
+  echo "Wrote new auth_key to $AUTH_JSON"
+fi
 
 # server.conf (JSON)。コンテナ内では /etc/mqvpn にマウントされる前提。
 cat > "$CONF_DIR/server.conf" <<EOF
@@ -46,7 +56,7 @@ cat > "$CONF_DIR/server.conf" <<EOF
   "max_clients": 64,
   "scheduler": "wlb",
   "cc": "bbr",
-  "reinjection": "off",
+  "reinjection": "deadline",
   "hybrid": { "enabled": false, "tcp": "auto", "tcp_max_flows": 2048 }
 }
 EOF

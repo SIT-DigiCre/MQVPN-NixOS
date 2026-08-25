@@ -40,7 +40,7 @@ let
     auth_key = mqvpnAuthKey;
     control_listen = "127.0.0.1:9090";
     log_level = "info";
-    reinjection = "off";
+    reinjection = "deadline";
     hybrid = {
       enabled = false;
       tcp = "auto";

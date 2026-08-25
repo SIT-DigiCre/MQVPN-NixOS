@@ -6,6 +6,18 @@
 #    各サーバーが別クライアントを受ける通常運用では設定不要。tun_name は
 #    netns 分離により全インスタンス同一でよい
 #
+# サーバーは `network_mode: host` で動かす。コンテナがホストの netns を共有する
+# ため、hybrid=off 時の脱カプセル化トラフィックの次ホップが docker veth/bridge
+# (ソフトウェア) ではなく物理 NIC (TSO/GRO/マルチキュー/DMA) になり、OS フォワード
+# 経路が回線速度に迫る。hybrid=off は生成される server.conf に設定。
+# netns 分離が無くなるため各インスタンスは別の tun_name / listen / control_listen /
+# exporter / subnet が必要。これらは MQVPN_INSTANCE_IDX から自動決定される
+# (エントリポイントが導出: tun_name=mqvpn<idx>, listen=0.0.0.0:(443+idx),
+# control_listen=127.0.0.1:(9090+idx*2), exporter=(9091+idx*2),
+# subnet=192.168.<idx>.0/24)。明示的な MQVPN_* env があれば優先。
+# 注: network_mode: host ではコンテナのホスト名がホスト(VM)のものになり
+# コンテナ名が取れないため、idx は必ず MQVPN_INSTANCE_IDX で渡す (1行のみ)。
+#
 # 【サーバーの増やし方】mqvpn-server-2 を追加する:
 #   - 新サービスの `ports` と MQVPN_SUBNET を変え、`<<: *mqvpn-server` で
 #     boilerplate を継承するだけ
@@ -26,6 +38,7 @@
 x-mqvpn-server: &mqvpn-server
   image: mqvpn-server:latest
   restart: unless-stopped
+  network_mode: host
   devices:
     - /dev/net/tun:/dev/net/tun
   cap_drop:
@@ -34,26 +47,23 @@ x-mqvpn-server: &mqvpn-server
     - NET_ADMIN
     - NET_BIND_SERVICE
   volumes:
-    - ./mqvpn-server-conf/server.conf:/etc/mqvpn/server.conf:ro
-    - ./mqvpn-server-conf/server.crt:/etc/mqvpn/server.crt:ro
-    - ./mqvpn-server-conf/server.key:/etc/mqvpn/server.key:ro
+    # 共有 server.conf (hybrid=off) + インスタンスごとに MQVPN_* env で差分
+    - ./mqvpn-server-conf:/etc/mqvpn:ro
 
 services:
   mqvpn-server-0:
     <<: *mqvpn-server
     container_name: mqvpn-server-0
     environment:
-      - MQVPN_SUBNET=192.168.0.0/24
-    ports:
-      - "443:443/udp"
+      # host-net ではコンテナ名が取れないため、インデックスだけ渡す。
+      # 残り (tun/listen/control/exporter/subnet) はエントリポイントが自動導出。
+      - MQVPN_INSTANCE_IDX=0
 
   mqvpn-server-1:
     <<: *mqvpn-server
     container_name: mqvpn-server-1
     environment:
-      - MQVPN_SUBNET=192.168.1.0/24
-    ports:
-      - "444:443/udp"
+      - MQVPN_INSTANCE_IDX=1
 
   prometheus:
     image: mqvpn-prometheus:latest
