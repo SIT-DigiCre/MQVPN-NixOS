@@ -70,7 +70,7 @@ in
       tcp = "auto";
       tcp_max_flows = 2048;
     };
-description = "MQVPN hybrid TCP lane config";
+ description = "MQVPN hybrid TCP lane config";
   };
 
   config =
@@ -429,7 +429,9 @@ description = "MQVPN hybrid TCP lane config";
                         gw=$(dhcpcd -U "$ifx" 2>/dev/null | sed -n 's/^routers=//p' | awk '{print $1}')
                       fi
                       [ -n "$gw" ] && [ "$gw" != "0.0.0.0" ] || continue
-                      new_wan="$new_wan via $gw dev $ifx"
+                      # 複数 nexthop のマルチパスには nexthop キーワードが必須
+                      # (単一時も有効。無いと replace 失敗しサーバー宛がトンネル内をループする)
+                      new_wan="$new_wan nexthop via $gw dev $ifx"
                     done
                   fi
                   [ -n "$new_wan" ] && wan_nexthops="$new_wan"
@@ -450,8 +452,11 @@ description = "MQVPN hybrid TCP lane config";
                       nhid=$((1000 + ${toString i}))
                       peer=$(peer_of "$dev")
                       if [ -n "$peer" ]; then
-                        ip nexthop add id $nhid via $peer dev $dev 2>/dev/null ||
-                          ip nexthop replace id $nhid via $peer dev $dev 2>/dev/null ||
+                        # PtP トンネル(mqvpn*) は dev のみでピアが確定する。
+                        # `via $peer` は mqvpn0 が副アドレス(192.168.0.2/32 brd ...)を
+                        # 持つ場合に "invalid gateway" で失敗するため dev のみを指定。
+                        ip nexthop add id $nhid dev $dev 2>/dev/null ||
+                          ip nexthop replace id $nhid dev $dev 2>/dev/null ||
                           echo "mqvpn-ecmp-assert: nexthop $nhid sync failed ($dev)" >&2
                         members="$members/$nhid"
                       else

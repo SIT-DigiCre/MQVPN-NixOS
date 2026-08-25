@@ -42,7 +42,7 @@ let
     log_level = "info";
     reinjection = "off";
     hybrid = {
-      enabled = true;
+      enabled = false;
       tcp = "auto";
       tcp_max_flows = 2048;
     };
