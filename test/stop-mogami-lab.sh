@@ -44,6 +44,13 @@ sudo ip link delete tc-mq 2>/dev/null || true
 sudo ip link delete tr-mq 2>/dev/null || true
 sudo ip link delete mqvpn-br0 2>/dev/null || true
 
-rm -rf result-mogami result-client result-server
-rm -f mogami-vm.qcow2 mogami-client.qcow2 mogami-server.qcow2
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+rm -rf "$SCRIPT_DIR/result-mogami" "$SCRIPT_DIR/result-client" "$SCRIPT_DIR/result-server" "$SCRIPT_DIR/result-mnet"
+rm -f "$SCRIPT_DIR/mogami-vm.qcow2" "$SCRIPT_DIR/mogami-client.qcow2" "$SCRIPT_DIR/mogami-server.qcow2" "$SCRIPT_DIR/mogami-mnet.qcow2"
+
+# ルートディレクトリの qcow2 も削除
+rm -f "$REPO_DIR/mogami-vm.qcow2" "$REPO_DIR/mogami-client.qcow2" "$REPO_DIR/mogami-server.qcow2" "$REPO_DIR/mogami-mnet.qcow2"
+
 echo "done"
