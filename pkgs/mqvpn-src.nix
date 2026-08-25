@@ -1,7 +1,7 @@
 { pkgs, stdenv, fetchFromGitHub, ... }:
 
 let
-  version = "0.16.0";
+  version = "0.16.1";
 in stdenv.mkDerivation {
   pname = "mqvpn";
   inherit version;
@@ -11,7 +11,7 @@ in stdenv.mkDerivation {
     repo = "mqvpn";
     rev = "v${version}";
     fetchSubmodules = true;
-    hash = "sha256-W96uDbXUBQKIZDStUEwMtaphME21SA7WaJCRFR/lgWk=";
+    hash = "sha256-1l3n+HIT/T0l8qXOaKjcBcCE4Vy8+l5liqIiU/xm3NI=";
   };
 
   patches = [
