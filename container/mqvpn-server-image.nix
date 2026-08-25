@@ -2,7 +2,6 @@
   pkgs,
 }:
 let
-  mqvpn = pkgs.callPackage ../pkgs/mqvpn.nix { };
   mqvpnExporter = pkgs.callPackage ../pkgs/mqvpn-exporter.nix { };
   mqvpnSrc = pkgs.callPackage ../pkgs/mqvpn-src.nix { };
 
@@ -120,7 +119,7 @@ let
     name = "mqvpn-server-root";
     paths = [
       natScript
-      mqvpn
+      mqvpnSrc
       mqvpnExporter
       pkgs.bash
       pkgs.dockerTools.binSh
