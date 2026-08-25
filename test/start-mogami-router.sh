@@ -7,7 +7,7 @@ echo "=== starting router VM ==="
 echo "  SSH       : ssh digicre@192.168.50.1  (password: router)"
 echo "  Dashboard : http://192.168.50.1/"
 echo "  LAN       : tr-mq -> mqvpn-br0"
-echo "  WAN       : 5x tap (trw0-4) -> mqvpn-srv-br0 -> server VM"
+echo "  WAN       : 12x tap (trw0-11) -> mqvpn-srv-br0 -> server VM"
 echo "  Mgmt      : tr-mgmt -> mq-mgmt-br0 "
 echo ""
 

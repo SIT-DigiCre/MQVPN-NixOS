@@ -14,7 +14,7 @@ host
   │     └── tc-mq  ────── mogami-client (eth0 = LAN)
   │
   ├── bridge mqvpn-srv-br0
-  │     ├── trw0-4 ────── mogami-vm (eth1/3-6 = WAN)
+  │     ├── trw0-11 ───── mogami-vm (eth1/3-13 = WAN)
   │     └── ts-mq  ────── mogami-server (eth1 = LAN)
   │
   ├── bridge mq-ext-br0 (192.168.100.0/24, mnet 専用)
@@ -33,7 +33,7 @@ host
   ├── SSH digicre@192.168.50.4 ── mogami-mnet (password: mnet)
   └── HTTP http://192.168.50.1/ ── mogami-vm (eth2, glances ダッシュボード)
 
-  WAN: 5× tap (eth1/3-6) → mqvpn-srv-br0 → mogami-server (10.200.0.1:443)
+  WAN: 12× tap (eth1/3-13) → mqvpn-srv-br0 → mogami-server (10.200.0.1:443)
 ```
 
 ## IP range 一覧
@@ -41,7 +41,7 @@ host
 | セグメント | Range | 構成 |
 |-----------|-------|------|
 | LAN (Client↔Router) | `172.16.0.0/12` | Router `172.16.0.1`, Client `172.16.0.2` (DHCP) |
-| WAN (Router↔Server) | `10.200.0.0/24` | Server `10.200.0.1`, Router `10.200.0.2-6` (5 WAN パス) |
+| WAN (Router↔Server) | `10.200.0.0/24` | Server `10.200.0.1`, Router `10.200.0.2-13` (12 WAN パス) |
 | MQVPN トンネル (ECMP) | `192.168.0.0/24` / `192.168.1.0/24` | Server `192.168.0.1` / `192.168.1.1` (server mode)、Router `192.168.0.x` / `192.168.1.x` (client)。server-0/1 で別 subnet |
 | mnet (ベンチターゲット) | `192.168.100.0/24` | mnet `192.168.100.1`、Server eth2 `192.168.100.2` |
 | 管理 | `192.168.50.0/24` | 専用 tap ブリッジ `mq-mgmt-br0` (Router .1 / Server .2 / Client .3 / mnet .4、VM 内にデフォルトルート無し) |
@@ -79,15 +79,12 @@ VM ビルダーが `net.ifnames=0` を強制するためインターフェース
 | `eth0` | LAN (tap tr-mq → mqvpn-br0) | 172.16.0.1/12 固定 |
 | `eth1` | WAN0 (tap trw0 → mqvpn-srv-br0) | 10.200.0.2/24 固定 |
 | `eth2` | 管理 (tap tr-mgmt → mq-mgmt-br0) | 192.168.50.1/24 固定 (ルート無し) |
-| `eth3` | WAN1 (tap trw1 → mqvpn-srv-br0) | 10.200.0.3/24 固定 |
-| `eth4` | WAN2 (tap trw2 → mqvpn-srv-br0) | 10.200.0.4/24 固定 |
-| `eth5` | WAN3 (tap trw3 → mqvpn-srv-br0) | 10.200.0.5/24 固定 |
-| `eth6` | WAN4 (tap trw4 → mqvpn-srv-br0) | 10.200.0.6/24 固定 |
+| `eth3-13` | WAN1-11 (tap trw1-11 → mqvpn-srv-br0) | 10.200.0.3-13/24 固定 |
 
 注意点:
 - 管理はブリッジ `mq-mgmt-br0` (192.168.50.0/24) 経由。VM 内に mgmt のデフォルトルートは置かない
   (テスト経路の外への経路を構造的に持たない)。
-- WAN の tap NIC (`eth1`, `eth3-6`) はブリッジ `mqvpn-srv-br0` 経由でサーバー VM に接続する。
+- WAN の tap NIC (`eth1`, `eth3-13`) はブリッジ `mqvpn-srv-br0` 経由でサーバー VM に接続する。
 
 ## 使い方
 

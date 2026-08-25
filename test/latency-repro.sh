@@ -6,12 +6,13 @@ set -euo pipefail
 #
 # 背景: 実環境(Ryzen 9 7900, 7パス: Starlink×3/モバイル×3/eduroam×1)では
 #       600Mbps 程度でサーバーの単スレッド mqvpn CPU が 100% になる。
-#       ラボ(遅延≈0ms の 5 本の tap)では ~3Gbps まで通る。
+#       ラボ(遅延≈0ms)では ~3Gbps まで通る (旧 5 tap 構成での計測値。
+#       現行 12 tap 構成では未計測)。
 #       この差が「経路遅延」に起因するかを tc netem で検証する。
 #
 # netem の適用先:
 #   - ts-mq  (サーバー側 tap):   クライアント→サーバー方向に +DELAYms
-#   - trw0-4 (ルーター側 tap×5): サーバー→クライアント方向に +DELAYms
+#   - trw0-11 (ルーター側 tap×12): サーバー→クライアント方向に +DELAYms
 #   よって往復 RTT は約 +2×DELAYms 増加する。
 #
 # Usage (sudo 必須: tap の qdisc を触るため):
@@ -30,7 +31,8 @@ DUR=${2:-15}
 RATE=${3:-1000}
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TAPS=(trw0 trw1 trw2 trw3 trw4 ts-mq)
+# tap 一覧は test/build-mogami-lab.sh が作る trw0-11 + サーバー側 ts-mq
+TAPS=(trw0 trw1 trw2 trw3 trw4 trw5 trw6 trw7 trw8 trw9 trw10 trw11 ts-mq)
 
 if [ "$(id -u)" != 0 ]; then
   echo "ERROR: needs root (sudo) to configure tap qdiscs"
@@ -45,7 +47,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "=== applying netem: +${DELAY}ms each direction (ts-mq + trw0-4) ==="
+echo "=== applying netem: +${DELAY}ms each direction (ts-mq + trw0-11) ==="
 for t in "${TAPS[@]}"; do
   tc qdisc replace dev "$t" root netem delay "${DELAY}ms"
 done

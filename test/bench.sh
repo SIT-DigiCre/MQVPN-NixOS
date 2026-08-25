@@ -18,7 +18,8 @@ set -euo pipefail
 #       例: ./test/bench.sh latency 50 800 15 down
 #
 #   ./test/bench.sh hetero [rate] [sec] [dir]
-#       実パス想定の不均質 netem (45/45/75/75/15ms + ロス) を適用
+#       実パス想定の不均質 netem (Starlink系45ms×5 / モバイル系75ms×5 /
+#       eduroam系15ms×2 + ロス) を適用
 #
 #   ./test/bench.sh multistream <n> [sec]
 #       下流 n クライアント並列 (iperf3 ポート別) + サーバー CPU
@@ -40,8 +41,6 @@ CMD="$1"; shift || true
 ssh_srv() { "$SCRIPT_DIR/ssh-server.sh" "$@"; }
 ssh_rtr() { timeout 90 "$SCRIPT_DIR/ssh-router.sh" "$@"; }
 ssh_cli() { "$SCRIPT_DIR/ssh-client.sh" "$@"; }
-
-SAMPLER_DUR=30
 
 # --- サンプラ等の配送 ---
 ship_common() {
@@ -81,27 +80,35 @@ SAMP
 }
 
 # --- netem ---
-rtr_wan=(eth1 eth3 eth4 eth5 eth6)
+# WAN NIC 一覧は test/mogami-vm.nix の vmWanInterfaces と同期すること (12 パス)
+rtr_wan=(eth1 eth3 eth4 eth5 eth6 eth7 eth8 eth9 eth10 eth11 eth12 eth13)
 
 clear_netem() {
-  ssh_rtr 'for i in eth1 eth3 eth4 eth5 eth6; do sudo -n tc qdisc del dev $i root 2>/dev/null || true; done; echo netem-cleared' 2>/dev/null || true
+  ssh_rtr "for i in ${rtr_wan[*]}; do sudo -n tc qdisc del dev \$i root 2>/dev/null || true; done; echo netem-cleared" 2>/dev/null || true
 }
 
 apply_uniform() {
   local ms="$1"
-  ssh_rtr "for i in eth1 eth3 eth4 eth5 eth6; do
-    sudo -n tc qdisc replace dev \$i root netem delay ${ms}ms limit 100000 2>/dev/null ||
-    sudo -n tc qdisc add dev \$i root netem delay ${ms}ms limit 100000
+  ssh_rtr "for i in ${rtr_wan[*]}; do
+    sudo -n tc qdisc replace dev \$i root netem delay ${ms}ms limit 100000
   done; echo applied" 2>/dev/null
 }
 
+# 不均質 netem: 実環境の分類比 (Starlink3 : モバイル3 : eduroam1) を 12 パス向けに
+# 拡大した比 (Starlink5 : モバイル5 : eduroam2)。リスト先頭から順に割り当てる。
 apply_hetero() {
-  ssh_rtr 'sudo -n tc qdisc add dev eth1 root netem delay 45ms 12ms loss 1% limit 100000 2>/dev/null || sudo -n tc qdisc replace dev eth1 root netem delay 45ms 12ms loss 1% limit 100000;
-sudo -n tc qdisc add dev eth3 root netem delay 45ms 12ms loss 1% limit 100000 2>/dev/null || sudo -n tc qdisc replace dev eth3 root netem delay 45ms 12ms loss 1% limit 100000;
-sudo -n tc qdisc add dev eth4 root netem delay 75ms 25ms loss 0.5% limit 100000 2>/dev/null || sudo -n tc qdisc replace dev eth4 root netem delay 75ms 25ms loss 0.5% limit 100000;
-sudo -n tc qdisc add dev eth5 root netem delay 75ms 25ms loss 0.5% limit 100000 2>/dev/null || sudo -n tc qdisc replace dev eth5 root netem delay 75ms 25ms loss 0.5% limit 100000;
-sudo -n tc qdisc add dev eth6 root netem delay 15ms 4ms loss 0.2% limit 100000 2>/dev/null || sudo -n tc qdisc replace dev eth6 root netem delay 15ms 4ms loss 0.2% limit 100000;
-echo applied' 2>/dev/null
+  local cmd="" i p
+  for i in "${!rtr_wan[@]}"; do
+    if [ "$i" -lt 5 ]; then
+      p="delay 45ms 12ms loss 1%"
+    elif [ "$i" -lt 10 ]; then
+      p="delay 75ms 25ms loss 0.5%"
+    else
+      p="delay 15ms 4ms loss 0.2%"
+    fi
+    cmd+="sudo -n tc qdisc replace dev ${rtr_wan[$i]} root netem $p limit 100000;"
+  done
+  ssh_rtr "$cmd echo applied" 2>/dev/null
 }
 
 # === iperf3 ===

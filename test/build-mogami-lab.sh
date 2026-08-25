@@ -35,7 +35,7 @@ nix build "path:$REPO_DIR#nixosConfigurations.mogami-mnet.config.system.build.vm
 ln -sf /tmp/result-mnet "$SCRIPT_DIR/result-mnet" 2>/dev/null || true
 
 echo "=== cleanup stale interfaces ==="
-for tap in trw0 trw1 trw2 trw3 trw4 ts-mq tr-mgmt ts-mgmt tc-mgmt tm-ext ts-ext tm-mgmt; do
+for tap in trw0 trw1 trw2 trw3 trw4 trw5 trw6 trw7 trw8 trw9 trw10 trw11 ts-mq tr-mgmt ts-mgmt tc-mgmt tm-ext ts-ext tm-mgmt; do
   sudo ip link delete "$tap" 2>/dev/null || true
 done
 sudo ip link delete mqvpn-srv-br0 2>/dev/null || true
@@ -48,7 +48,7 @@ sudo ip link delete $BRIDGE 2>/dev/null || true
 echo "=== creating server bridge: mqvpn-srv-br0 (10.200.0.0/24) ==="
 sudo ip link add mqvpn-srv-br0 type bridge
 sudo ip link set mqvpn-srv-br0 up
-for tap in trw0 trw1 trw2 trw3 trw4; do
+for tap in trw0 trw1 trw2 trw3 trw4 trw5 trw6 trw7 trw8 trw9 trw10 trw11; do
   sudo ip tuntap add "$tap" mode tap user "$USER"
   sudo ip link set "$tap" master mqvpn-srv-br0
   sudo ip link set "$tap" up
@@ -114,7 +114,7 @@ done
 
 echo ""
 echo "=== done ==="
-echo "WAN: 5x tap via mqvpn-srv-br0 -> server VM (10.200.0.1)"
+echo "WAN: 12x tap via mqvpn-srv-br0 -> server VM (10.200.0.1)"
 echo "LAN: $TAP_ROUTER + $TAP_CLIENT via $BRIDGE (172.16.0.0/12)"
 echo "Mgmt: 4x tap via mq-mgmt-br0 (192.168.50.1 router / .2 server / .3 client / .4 mnet)"
 echo "Ext: tm-ext + ts-ext via mq-ext-br0 (192.168.100.1 mnet / .2 server)"
