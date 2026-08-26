@@ -5,7 +5,7 @@
   ...
 }:
 let
-  mqvpn = pkgs.callPackage ./pkgs/mqvpn-dbg.nix { };
+  mqvpn = pkgs.callPackage ./pkgs/mqvpn-src.nix { };
 
   live-chart = pkgs.callPackage ./pkgs/live-chart.nix { };
 
@@ -22,7 +22,7 @@ let
     '';
   };
 
-  internalInterfaceName = "enp10s0";
+  internalInterfaceName = config.services.mqvpn.lanInterface;
   localIp = "172.16.0.1";
 
 in
@@ -71,6 +71,12 @@ in
       tcp_max_flows = 2048;
     };
  description = "MQVPN hybrid TCP lane config";
+  };
+
+  options.services.mqvpn.lanInterface = lib.mkOption {
+    type = lib.types.str;
+    default = "enp10s0";
+    description = "LAN-facing interface (kea DHCP / NAT / 起動待機の対象)";
   };
 
   config =
@@ -179,9 +185,7 @@ in
 
       # リポジトリ全体をシステムに配置
       systemd.tmpfiles.rules = [
-        "C /etc/nixos 0755 digicre users - ${./.}"
         "C /home/digicre/mqvpn-router 0755 digicre users - ${./.}"
-        "Z /etc/nixos/.git 0755 digicre users - -"
         "Z /home/digicre/mqvpn-router/.git 0755 digicre users - -"
       ];
 

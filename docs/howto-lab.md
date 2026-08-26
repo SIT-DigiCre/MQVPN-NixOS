@@ -120,4 +120,4 @@ VM ビルダーが `net.ifnames=0` を強制するためインターフェース
 | サーバー起動（フォアグラウンド） | `./test/start-mogami-server.sh` |
 | クライアント起動（フォアグラウンド） | `./test/start-mogami-client.sh` |
 | mnet 起動（フォアグラウンド） | `./test/start-mogami-mnet.sh` |
-| 終了・クリーンアップ | `./test/stop-mogami-lab.sh` / `./test/cleanup-mnet.sh` |
+| 終了・クリーンアップ | `./test/stop-mogami-lab.sh` |

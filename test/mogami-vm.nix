@@ -1,7 +1,6 @@
 {
   config,
   lib,
-  pkgs,
   ...
 }: let
   # 管理ネットワークは専用 tap ブリッジ mq-mgmt-br0 (192.168.50.0/24)。
@@ -105,11 +104,8 @@ in {
   hardware.enableRedistributableFirmware = lib.mkForce false;
   hardware.firmware = lib.mkForce [];
 
-  networking.nat.internalInterfaces = lib.mkForce [vmLanInterface];
-
-  services.kea.dhcp4.settings.interfaces-config.interfaces = lib.mkForce [vmLanInterface];
-
   services.mqvpn.interfaces = vmWanInterfaces;
+  services.mqvpn.lanInterface = vmLanInterface;
 
   # クライアントは port リストで定義 (IP は auth.server_addr、WAN NIC は interfaces)
   services.mqvpn.clientPorts = [ 443 444 ];
@@ -120,17 +116,4 @@ in {
     hashedPassword = lib.mkForce null;
     password = "router";
   };
-
-  systemd.services.kea-dhcp4-server.preStart = lib.mkForce ''
-    echo "Waiting for interface ${vmLanInterface} to be Running..."
-    for i in {1..120}; do
-      if ${pkgs.iproute2}/bin/ip link show dev "${vmLanInterface}" 2>/dev/null | grep -q "LOWER_UP"; then
-        echo "Interface ${vmLanInterface} is up and running"
-        exit 0
-      fi
-      sleep 1
-    done
-    echo "Timeout waiting for interface ${vmLanInterface}."
-    exit 1
-  '';
 }

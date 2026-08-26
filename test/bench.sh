@@ -4,8 +4,8 @@ set -euo pipefail
 # =============================================================================
 # mqvpn ラボ統合ベンチ/プロファイルツール
 #
-# 調査で使った個別スクリプト (repro-cpu-saturation.sh / latency-repro.sh /
-# latency-hetero-repro.sh) の機能を1つにまとめたもの。perf プロファイリングも可。
+# 調査で使った個別スクリプト (repro-cpu-saturation.sh) の機能を1つにまとめたもの。
+# perf プロファイリングも可。
 #
 # Usage:
 #   ./test/bench.sh clean
@@ -80,8 +80,10 @@ SAMP
 }
 
 # --- netem ---
-# WAN NIC 一覧は test/mogami-vm.nix の vmWanInterfaces と同期すること (12 パス)
-rtr_wan=(eth1 eth3 eth4 eth5 eth6 eth7 eth8 eth9 eth10 eth11 eth12 eth13)
+# WAN NIC 一覧の唯一の情報源は mogami-vm の services.mqvpn.interfaces
+# (= test/mogami-vm.nix の vmWanInterfaces)。flake から導出して同期ずれを防ぐ。
+rtr_wan=($(nix eval --json "path:$(cd "$SCRIPT_DIR/.." && pwd)#nixosConfigurations.mogami-vm.config.services.mqvpn.interfaces" 2>/dev/null | tr -d '[]"' | tr ',' ' ' || true))
+[ "${#rtr_wan[@]}" -gt 0 ] || { echo "ERROR: WAN NIC 一覧を flake から取得できない" >&2; exit 1; }
 
 clear_netem() {
   ssh_rtr "for i in ${rtr_wan[*]}; do sudo -n tc qdisc del dev \$i root 2>/dev/null || true; done; echo netem-cleared" 2>/dev/null || true
