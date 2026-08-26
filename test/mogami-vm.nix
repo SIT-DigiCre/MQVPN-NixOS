@@ -11,7 +11,7 @@
   #   eth0:    tap tr-mq    - LAN (static 172.16.0.1/12)
   #   eth1:    tap trw0     - WAN0
   #   eth2:    tap tr-mgmt  - mgmt (static 192.168.50.1/24, ルート無し)
-  #   WAN: eth1(trw0) + eth3-13(trw1-11) = 12 パス
+  #   WAN: eth1(trw0) + eth3-13(trw1-11) = 12 パス (内 mqvpn が使うのは 3 本)
   vmLanInterface = "eth0";
   vmMgmtInterface = "eth2";
   vmWanInterfaces = ["eth1" "eth3" "eth4" "eth5" "eth6" "eth7" "eth8" "eth9" "eth10" "eth11" "eth12" "eth13"];
@@ -111,7 +111,9 @@ in {
   hardware.enableRedistributableFirmware = lib.mkForce false;
   hardware.firmware = lib.mkForce [];
 
-  services.mqvpn.interfaces = vmWanInterfaces;
+  # mqvpn が実際にトンネルパスとして使う WAN は 3 本 (本番 3x Starlink 相当)。
+  # NIC は 12 本残したまま、使うパスだけ絞る (残りは将来の拡張/監視用)。
+  services.mqvpn.interfaces = ["eth1" "eth3" "eth4"];
   services.mqvpn.lanInterface = vmLanInterface;
 
   # クライアントは port リストで定義 (IP は auth.server_addr、WAN NIC は interfaces)

@@ -21,6 +21,11 @@ set -euo pipefail
 #       実パス想定の不均質 netem (Starlink系45ms×5 / モバイル系75ms×5 /
 #       eduroam系15ms×2 + ロス) を適用
 #
+#   ./test/bench.sh collapse3 [rate] [sec] [dir]
+#       本番 3x Starlink 崩壊再現: 12 WAN を 3 ティア (A=30ms / B=42ms+稀スパイク /
+#       C=35ms) に分け、最安・最安定の A へピンが集中する崩壊を再現
+#       (A=idx0-3, B=idx4-7, C=idx8-11)
+#
 #   ./test/bench.sh multistream <n> [sec]
 #       下流 n クライアント並列 (iperf3 ポート別) + サーバー CPU
 #
@@ -33,7 +38,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-HELLO_CMD="latency|hetero|multistream|profile|clean"
+HELLO_CMD="latency|hetero|collapse3|multistream|profile|clean"
 [ $# -ge 1 ] || { echo "usage: $0 <$HELLO_CMD> [...]"; exit 1; }
 CMD="$1"; shift || true
 
@@ -113,6 +118,23 @@ apply_hetero() {
   ssh_rtr "$cmd echo applied" 2>/dev/null
 }
 
+# 本番 3x Starlink 崩壊再現 (WAN は 3 本に削減済み、本番物理 3 回線と一致)。
+# idx0 = Starlink A (最安・最安定・最高率 → ピン集中先): delay 30ms rate 458mbit
+# idx1 = Starlink B (ジッター大, 稀スパイク=pareto):     delay 42ms 15ms distribution pareto rate 400mbit
+# idx2 = Starlink C (中間):                              delay 35ms rate 450mbit
+apply_collapse3() {
+  local specs=(
+    "delay 30ms rate 458mbit"
+    "delay 42ms 15ms distribution pareto rate 400mbit"
+    "delay 35ms rate 450mbit"
+  )
+  local cmd="" i
+  for i in "${!rtr_wan[@]}"; do
+    cmd+="sudo -n tc qdisc replace dev ${rtr_wan[$i]} root netem ${specs[$i]} limit 100000;"
+  done
+  ssh_rtr "$cmd echo applied" 2>/dev/null
+}
+
 # === iperf3 ===
 samp_start() {
   local dur="$1"
@@ -174,7 +196,7 @@ ensure_rmem() {
 }
 
 # =============================================================================
-CMDRUN="latency|hetero|multistream|profile|clean"
+CMDRUN="latency|hetero|collapse3|multistream|profile|clean"
 
 case "$CMD" in
   clean)
@@ -203,6 +225,18 @@ case "$CMD" in
     out=$(run_udp "$RATE" "$DIR" "$SEC")
     sleep 1
     echo "== hetero ${DIR} ${RATE}M =="
+    echo "  iperf : $out"
+    echo "  srvCPU: $(samp_max S)  rtrCPU: $(samp_max R)"
+    ;;
+  collapse3)
+    RATE="${1:-800}"; SEC="${2:-15}"; DIR="${3:-down}"
+    ensure_iperfd_mnet; ensure_rmem; ship_common; clear_netem; apply_collapse3
+    sleep 8
+    ssh_cli "ping -c 2 -W 3 $TARGET 2>&1 | tail -1" 2>/dev/null | tail -1
+    samp_start "$((SEC + 6))"
+    out=$(run_udp "$RATE" "$DIR" "$SEC")
+    sleep 1
+    echo "== collapse3 ${DIR} ${RATE}M (A=30 B=42+jit C=35) =="
     echo "  iperf : $out"
     echo "  srvCPU: $(samp_max S)  rtrCPU: $(samp_max R)"
     ;;
