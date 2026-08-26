@@ -1,6 +1,16 @@
+diff --git a/third_party/xquic/src/transport/scheduler/xqc_scheduler_wlb.c b/third_party/xquic/src/transport/scheduler/xqc_scheduler_wlb.c
+index f40f2e8..a6817e6 100644
 --- a/third_party/xquic/src/transport/scheduler/xqc_scheduler_wlb.c
 +++ b/third_party/xquic/src/transport/scheduler/xqc_scheduler_wlb.c
-@@ -195,6 +195,9 @@
+@@ -106,6 +106,7 @@ typedef struct {
+     int                  force_refresh_paths; /* refresh WRR cache on recovery */
+     uint64_t             recovery_unpin_until_us; /* temporarily disable TCP pinning after recovery */
+     uint64_t             recovery_prefer_path_id; /* newly recovered path to prefer for first re-pin */
++    int64_t              pin_credit[WLB_MAX_PATHS]; /* §2-G: capacity-proportional RR credit for pins */
+     /* Set once a previously-healthy path has been observed as unhealthy. Gates
+      * the "newly appeared path = recovery" heuristic so the heuristic does not
+      * fire during initial multi-path setup (e.g. secondary path coming up
+@@ -195,6 +196,9 @@ wlb_flow_expire(xqc_wlb_scheduler_t *s, uint64_t now_us, xqc_connection_t *conn)
      }
      s->last_expire_ts = now_us;
  
@@ -10,7 +20,7 @@
      /*
       * Detect path recovery/addition (e.g. failover path comes back) without
       * mutating scheduler WRR state here.  Updating s->paths inside expire()
-@@ -353,8 +356,17 @@
+@@ -353,8 +357,17 @@ wlb_flow_expire(xqc_wlb_scheduler_t *s, uint64_t now_us, xqc_connection_t *conn)
          double loss = xqc_path_recent_loss_rate(path) / 100.0;
          if (loss >= WLB_LOSS_EVICT_THRESH) {
              e->hash = WLB_FLOW_TOMBSTONE;
@@ -28,7 +38,7 @@
  }
  
  /* ---------- path helpers ---------- */
-@@ -559,8 +571,15 @@
+@@ -559,8 +572,15 @@ wlb_compute_weight(xqc_path_ctx_t *path, uint64_t max_rtt_us)
      double N = late_estimate_dgram(T_us, (double)srtt_us,
                                     cwnd_pkts, ssthresh, loss);
  
@@ -46,7 +56,15 @@
      return weight > 0 ? weight : 1;
  }
  
-@@ -702,17 +721,47 @@
+@@ -658,6 +678,7 @@ wlb_refresh_paths(xqc_wlb_scheduler_t *s, xqc_connection_t *conn)
+         }
+         s->paths[n].path_id = path->path_id;
+         s->paths[n].weight  = wlb_compute_weight(path, max_rtt_us);
++        s->pin_credit[n] = 0;  /* §2-G: reset per-round pin RR credit */
+ 
+         /* Preserve deficit for existing paths */
+         s->paths[n].deficit = 0;
+@@ -702,17 +723,47 @@ wlb_start_round(xqc_wlb_scheduler_t *s)
      }
  
      uint64_t min_w = UINT64_MAX;
@@ -72,7 +90,8 @@
 +        floor_w = 1;
 +    }
 +    uint64_t min_eff = UINT64_MAX;
-+    for (int i = 0; i < s->n_paths; i++) {
+     for (int i = 0; i < s->n_paths; i++) {
+-        int64_t quantum = (int64_t)(s->paths[i].weight / min_w);
 +        uint64_t eff = s->paths[i].weight;
 +        if (eff < floor_w) {
 +            eff = floor_w;
@@ -85,8 +104,7 @@
 +        min_eff = 1;
 +    }
 +
-     for (int i = 0; i < s->n_paths; i++) {
--        int64_t quantum = (int64_t)(s->paths[i].weight / min_w);
++    for (int i = 0; i < s->n_paths; i++) {
 +        uint64_t eff = s->paths[i].weight;
 +        if (eff < floor_w) {
 +            eff = floor_w;
@@ -95,3 +113,54 @@
          if (quantum < 1) {
              quantum = 1;
          }
+@@ -736,31 +787,34 @@ wlb_start_round(xqc_wlb_scheduler_t *s)
+ static uint64_t
+ wlb_pick_pin_path(xqc_wlb_scheduler_t *s, xqc_connection_t *conn)
+ {
+-    /* Pick the path with the highest deficit (≈ highest LATE weight) for
+-     * pin assignment, even if it is currently cwnd-blocked. wrr_select
+-     * (just before) already chose a sendable path for the current packet;
+-     * the pin is what subsequent packets of this flow will key off, and
+-     * it must reflect the long-term best path, not transient cwnd state.
+-     *
+-     * Under sym fabric (equal weights → equal quanta), wrr_select
+-     * decrements one path's deficit by 1 → pick_pin sees the OTHER path
+-     * as max → flows alternate naturally. Under asym (3:1+ quantum), the
+-     * wide path stays max-deficit through several decrements before
+-     * narrow gets its turn, giving weighted alternation.
+-     */
++    /* §2-G: capacity-proportional round-robin PIN assignment.
++     * The packet-driven WRR deficit (wlb_wrr_select) rotates per *packet*,
++     * which lags bursty flow arrivals (e.g. speedtest opens all streams at
++     * once), so a burst clumps on the warm primary (chiken/.../§1-(5)).
++     * Rotating the PIN target per *flow* via a shared credit counter spreads
++     * flows across paths proportional to their LATE weight even on a
++     * simultaneous burst. O(n_paths), runs only at pin time (not per packet),
++     * so it adds no per-packet overhead. */
+     int best = -1;
+-    int64_t best_deficit = INT64_MIN;
++    int64_t best_c = INT64_MIN;
++    int64_t total_w = 0;
+     for (int i = 0; i < s->n_paths; i++) {
+         xqc_path_ctx_t *path = wlb_find_path_ctx(conn, s->paths[i].path_id);
+         if (path == NULL) {
+             continue;
+         }
+-        if (s->paths[i].deficit > best_deficit) {
+-            best_deficit = s->paths[i].deficit;
++        s->pin_credit[i] += (int64_t)s->paths[i].weight;
++        total_w += (int64_t)s->paths[i].weight;
++        if (s->pin_credit[i] > best_c) {
++            best_c = s->pin_credit[i];
+             best = i;
+         }
+     }
+-    return (best >= 0) ? s->paths[best].path_id : WLB_NO_PATH_ID;
++    if (best >= 0) {
++        s->pin_credit[best] -= total_w;
++        return s->paths[best].path_id;
++    }
++    return WLB_NO_PATH_ID;
+ }
+ 
+ /**
