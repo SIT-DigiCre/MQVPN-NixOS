@@ -42,7 +42,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-HELLO_CMD="latency|hetero|collapse3|measure|multistream|profile|clean"
+HELLO_CMD="latency|hetero|collapse3|measure|multistream|profile|stagger|clean"
 [ $# -ge 1 ] || { echo "usage: $0 <$HELLO_CMD> [...]"; exit 1; }
 CMD="$1"; shift || true
 
@@ -235,6 +235,48 @@ do_measure() {
 # は NAPT 構成では不要(過去の SLiRP 環境限定シナリオ)。DOWN 計測は mnet
 # (192.168.100.1) 宛をクライアントから -R で打ち、NAPT 互換の流れで行う。
 
+# do_stagger [N] [gap_s] [sec] [tcp|udp] [down|up]
+#   複数コネクションを gap 秒ずつずらして同時開始し、到着が分散する際に
+#   WLB がピンを各パスへ振り分けるかを per-path で計測する。
+#   各コネクションは異ポート(5201..)なので別フロー(=別ピン)として扱われる。
+do_stagger() {
+  local N="${1:-20}" gap="${2:-1}" sec="${3:-15}" proto="${4:-tcp}" dir="${5:-down}"
+  local flag="" uflag="" win=$(( gap * (N - 1) + sec ))
+  [ "$dir" = "down" ] && flag="-R"
+  [ "$proto" = "udp" ] && uflag="-u"
+  ensure_iperfd_mnet; ensure_rmem; ship_common
+
+  declare -A CEIL
+  for w in "${rtr_wan[@]}"; do
+    local c; c=$(ssh_rtr "tc qdisc show dev $w 2>/dev/null | grep -o 'rate [0-9]*Mbit' | grep -o '[0-9]*'" 2>/dev/null | tail -1)
+    CEIL[$w]=${c:-0}
+  done
+  declare -A B0
+  for w in "${rtr_wan[@]}"; do B0[$w]=$(rx_bytes "$w"); done
+
+  samp_start "$((win + 4))"
+  local i p
+  for i in $(seq 1 "$N"); do
+    p=$((5200 + i))
+    ssh_cli "iperf3 -c $TARGET -p $p ${uflag} ${flag} -t $sec > /tmp/stg-$i.txt 2>&1" &
+    sleep "$gap"
+  done
+  sleep $((win + 2)); wait 2>/dev/null || true
+
+  echo "== stagger $proto N=$N gap=${gap}s window=${win}s $dir =="
+  local tot=0 w mbps ceil util B1
+  for w in "${rtr_wan[@]}"; do
+    B1=$(rx_bytes "$w")
+    mbps=$(( (${B1:-0} - ${B0[$w]:-0}) * 8 / (win * 1000000) ))
+    ceil=${CEIL[$w]}
+    if [ "$ceil" = 0 ]; then util="NA"; else util=$(( mbps * 100 / ceil )); fi
+    printf "  %-6s %8d Mbps  ceil %sM  util %s%%\n" "$w" "$mbps" "$ceil" "$util"
+    tot=$((tot + mbps))
+  done
+  echo "  TOTAL (tunnel-bound) = ${tot} Mbps"
+  echo "  rtrCPU: $(samp_max R)"
+}
+
 # --- クライアントの UDP 受信バッファ拡大 ---
 # 高レート測定 (特に RTT≈0 のラボ) では受信側ソケット溢れがロスに見えるため、
 # rmem を 64MB に拡大する (chiken/mqvpn-loss-investigation.md 参照)
@@ -243,7 +285,7 @@ ensure_rmem() {
 }
 
 # =============================================================================
-CMDRUN="latency|hetero|collapse3|measure|multistream|profile|clean"
+CMDRUN="latency|hetero|collapse3|measure|multistream|profile|stagger|clean"
 
 case "$CMD" in
   clean)
@@ -293,7 +335,11 @@ case "$CMD" in
     echo "  iperf : $out"
     ssh_srv "sudo -n ${PERF} report -i ${PERFDATA} --stdio --sort symbol --no-child --percent-limit 2 2>&1 | grep -E '^ *[0-9.]+\%  \[\.\]' | head -12" 2>/dev/null | tail -12
     ;;
+  stagger)
+    N="${1:-20}"; GAP="${2:-1}"; SEC="${3:-15}"; PROTO="${4:-tcp}"; DIR="${5:-down}"
+    do_stagger "$N" "$GAP" "$SEC" "$PROTO" "$DIR"
+    ;;
   *)
-    echo "unknown: $CMD (use: $CMDRUN)"; exit 1
+    echo "unknown: $CMD (use: $CMDRUN)"; exit 1;
     ;;
 esac

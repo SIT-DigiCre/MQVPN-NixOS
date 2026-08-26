@@ -70,7 +70,7 @@ in
       tcp = "auto";
       tcp_max_flows = 2048;
     };
- description = "MQVPN hybrid TCP lane config";
+   description = "MQVPN hybrid TCP lane config";
   };
 
   options.services.mqvpn.lanInterface = lib.mkOption {
