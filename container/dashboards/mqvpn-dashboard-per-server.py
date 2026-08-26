@@ -43,10 +43,9 @@ d["refresh"] = "auto"
 instances = []
 if len(sys.argv) >= 4:
     compose_text = open(sys.argv[3]).read()
-    instances = [
-        f"{n}:9091"
-        for n in re.findall(r"^\s+(mqvpn-server-[0-9]+):", compose_text, re.M)
-    ]
+    # instance ラベルは prometheus.yml でサービス名に固定しているため、
+    # 初期選択もサービス名にする (name:9091 ではない)
+    instances = re.findall(r"^\s+(mqvpn-server-[0-9]+):", compose_text, re.M)
 d["templating"]["list"].append(
     {
         "name": "instance",
