@@ -1,0 +1,97 @@
+--- a/third_party/xquic/src/transport/scheduler/xqc_scheduler_wlb.c
++++ b/third_party/xquic/src/transport/scheduler/xqc_scheduler_wlb.c
+@@ -195,6 +195,9 @@
+     }
+     s->last_expire_ts = now_us;
+ 
++    /* Rotating index for periodic rebalance (see loop below). */
++    static uint32_t rebal_idx;
++
+     /*
+      * Detect path recovery/addition (e.g. failover path comes back) without
+      * mutating scheduler WRR state here.  Updating s->paths inside expire()
+@@ -353,8 +356,17 @@
+         double loss = xqc_path_recent_loss_rate(path) / 100.0;
+         if (loss >= WLB_LOSS_EVICT_THRESH) {
+             e->hash = WLB_FLOW_TOMBSTONE;
++            continue;
++        }
++
++        /* Periodic rebalance: re-pin a rotating 1/8 slice of live flows each
++         * sweep (≈1/s) so pins converge to the current rate-based weights
++         * instead of sticking to the warmup winner. (§2-C) */
++        if (((uint32_t)i % 8) == rebal_idx) {
++            e->hash = WLB_FLOW_TOMBSTONE;
+         }
+     }
++    rebal_idx = (rebal_idx + 1) % 8;
+ }
+ 
+ /* ---------- path helpers ---------- */
+@@ -559,8 +571,15 @@
+     double N = late_estimate_dgram(T_us, (double)srtt_us,
+                                    cwnd_pkts, ssthresh, loss);
+ 
+-    /* Scale ×1000 to preserve precision in integer weight */
+-    uint64_t weight = (uint64_t)(N * 1000.0);
++    /* Weight ∝ delivery RATE, not ∝ cwnd/BDP.
++     * N is the number of packets deliverable within window T_us; dividing by
++     * T_us yields packets/us = throughput.  The old weight = N*1000 made
++     * weight ∝ cwnd (BDP ∝ RTT), biasing the highest-RTT path and causing the
++     * single-path collapse (chiken/mqvpn-wlb-distribution-and-bandwidth.md §2-A).
++     * Rate-based weight gives equal-bandwidth paths ~equal WRR quanta so they
++     * aggregate instead of one path winning all pins. */
++    double rate_per_us = N / T_us;              /* packets per microsecond */
++    uint64_t weight = (uint64_t)(rate_per_us * 1e9);  /* pkts/sec, scale-invariant */
+     return weight > 0 ? weight : 1;
+ }
+ 
+@@ -702,17 +721,47 @@
+     }
+ 
+     uint64_t min_w = UINT64_MAX;
++    uint64_t max_w = 0;
+     for (int i = 0; i < s->n_paths; i++) {
+         if (s->paths[i].weight < min_w) {
+             min_w = s->paths[i].weight;
+         }
++        if (s->paths[i].weight > max_w) {
++            max_w = s->paths[i].weight;
++        }
+     }
+     if (min_w == 0) {
+         min_w = 1;
+     }
+ 
++    /* Weight floor: no path may fall below 1/4 of the max-weight path, so a
++     * high-cwnd (high-RTT) path cannot starve the others of pins during the
++     * warmup/sticky-pin phase.  Pairs with the rate-based weight (§2-A) to let
++     * equal-bandwidth paths aggregate. (chiken/mqvpn-wlb-distribution-and-bandwidth.md §2-B) */
++    uint64_t floor_w = max_w / 4;
++    if (floor_w < 1) {
++        floor_w = 1;
++    }
++    uint64_t min_eff = UINT64_MAX;
++    for (int i = 0; i < s->n_paths; i++) {
++        uint64_t eff = s->paths[i].weight;
++        if (eff < floor_w) {
++            eff = floor_w;
++        }
++        if (eff < min_eff) {
++            min_eff = eff;
++        }
++    }
++    if (min_eff == 0) {
++        min_eff = 1;
++    }
++
+     for (int i = 0; i < s->n_paths; i++) {
+-        int64_t quantum = (int64_t)(s->paths[i].weight / min_w);
++        uint64_t eff = s->paths[i].weight;
++        if (eff < floor_w) {
++            eff = floor_w;
++        }
++        int64_t quantum = (int64_t)(eff / min_eff);
+         if (quantum < 1) {
+             quantum = 1;
+         }

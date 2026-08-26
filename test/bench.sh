@@ -21,10 +21,14 @@ set -euo pipefail
 #       実パス想定の不均質 netem (Starlink系45ms×5 / モバイル系75ms×5 /
 #       eduroam系15ms×2 + ロス) を適用
 #
-#   ./test/bench.sh collapse3 [rate] [sec] [dir]
-#       本番 3x Starlink 崩壊再現: 12 WAN を 3 ティア (A=30ms / B=42ms+稀スパイク /
-#       C=35ms) に分け、最安・最安定の A へピンが集中する崩壊を再現
-#       (A=idx0-3, B=idx4-7, C=idx8-11)
+#   ./test/bench.sh collapse3
+#       本番 3x Starlink 崩壊再現: WAN 3 本 (eth1=A / eth3=B / eth4=C) に
+#       A=30ms/458M, B=42ms+pareto/400M, C=35ms/450M を適用し、TCP 単一/多フロー
+#       での 1 パス固着(崩壊) と UDP での全パス分散を per-path で表示。
+#
+#   ./test/bench.sh measure [tcp|udp] [P] [rate] [dir] [sec]
+#       任意の netem 下で iperf3 を流し、各 WAN の rx スループット・ceiling 比・
+#       利用率・TOTAL・クライアント合計を表示 (collapse3 等で事前に netem を掛けて使う)。
 #
 #   ./test/bench.sh multistream <n> [sec]
 #       下流 n クライアント並列 (iperf3 ポート別) + サーバー CPU
@@ -38,7 +42,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-HELLO_CMD="latency|hetero|collapse3|multistream|profile|clean"
+HELLO_CMD="latency|hetero|collapse3|measure|multistream|profile|clean"
 [ $# -ge 1 ] || { echo "usage: $0 <$HELLO_CMD> [...]"; exit 1; }
 CMD="$1"; shift || true
 
@@ -156,6 +160,8 @@ samp_max() { # $1=host S|R
 # 自動で A/B 両サーバーへフローを振り分ける)。
 # BENCH_TARGET=192.168.0.1 でトンネル peer 宛の従来計測も可能 (非推奨)。
 TARGET="${BENCH_TARGET:-192.168.100.1}"
+# iperf ポート (ensure_iperfd_mnet が mnet に 6205 + 5201..5300 を開く)
+PORT="${BENCH_PORT:-6205}"
 
 # サーバーコンテナ名を動的解決 (mqvpn-server-N のハードコードを避ける)
 SRV_CTR=$("$SCRIPT_DIR/ssh-server.sh" 'sudo docker ps --filter name=mqvpn-server --format "{{.Names}}" | head -1' 2>/dev/null | tr -d '\r')
@@ -174,11 +180,52 @@ ensure_iperfd_mnet() {
   "$SCRIPT_DIR/ssh-mnet.sh" 'for p in 6205 $(seq 5201 5300); do ss -tln | grep -q $p || iperf3 -s -p $p -D --logfile /tmp/i3-$p.log 2>/dev/null; done; echo iperfd-mnet-ok' >/dev/null 2>&1 || true
 }
 
-run_udp() { # rate dir sec
-  local rate="$1" dir="$2" sec="$3"
-  local flag=""
+# --- unified measurement with per-path rx breakdown ---
+# 各 WAN の rx バイト数を取得 (ssh ラッパの "fetching/Warning" 行を数値のみに絞る)
+rx_bytes() { # $1=iface
+  ssh_rtr "ip -s link show $1 2>/dev/null | awk '/RX:/{getline;print \$1}'" 2>/dev/null | grep -E '^[0-9]+$' | tail -1
+}
+
+# do_measure [tcp|udp] [P] [rate_M] [down|up] [sec]
+#   iperf3 を流しつつ各 WAN の rx スループット・ceiling 比・利用率・TOTAL を表示。
+#   ceiling は tc qdisc から動的取得するので uniform/hetero/collapse3 いずれでも正しく出る。
+do_measure() {
+  local proto="${1:-tcp}" P="${2:-20}" rate="${3:-1200}" dir="${4:-down}" sec="${5:-15}"
+  local flag="" uflag=""
   [ "$dir" = "down" ] && flag="-R"
-  ssh_cli "iperf3 -c $TARGET -p 6205 -u ${flag} -b ${rate}M -t ${sec} -f m 2>&1 | grep receiver | tail -1" 2>/dev/null | tail -1
+  [ "$proto" = "udp" ] && uflag="-u"
+  ensure_iperfd_mnet; ensure_rmem; ship_common
+
+  # 各 WAN の netem ceiling (Mbit) を tc から動的取得
+  declare -A CEIL
+  for w in "${rtr_wan[@]}"; do
+    local c; c=$(ssh_rtr "tc qdisc show dev $w 2>/dev/null | grep -o 'rate [0-9]*Mbit' | grep -o '[0-9]*'" 2>/dev/null | tail -1)
+    CEIL[$w]=${c:-0}
+  done
+
+  # 負荷前の rx スナップショット
+  declare -A B0
+  for w in "${rtr_wan[@]}"; do B0[$w]=$(rx_bytes "$w"); done
+
+  samp_start "$((sec + 4))"
+  ssh_cli "iperf3 -c $TARGET -p $PORT ${uflag} ${flag} -P $P -b ${rate}M -t $sec > /tmp/mb.txt 2>&1" &
+  local IP=$!
+  sleep $((sec + 2))
+  wait "$IP" 2>/dev/null || true
+
+  echo "== $proto P=$P $dir @ ${sec}s (WAN: ${rtr_wan[*]}) =="
+  local tot=0 w mbps ceil util B1
+  for w in "${rtr_wan[@]}"; do
+    B1=$(rx_bytes "$w")
+    mbps=$(( (${B1:-0} - ${B0[$w]:-0}) * 8 / (sec * 1000000) ))
+    ceil=${CEIL[$w]}
+    if [ "$ceil" = 0 ]; then util="NA"; else util=$(( mbps * 100 / ceil )); fi
+    printf "  %-6s %8d Mbps  ceil %sM  util %s%%\n" "$w" "$mbps" "$ceil" "$util"
+    tot=$((tot + mbps))
+  done
+  echo "  TOTAL (tunnel-bound) = ${tot} Mbps"
+  echo "  client: $(ssh_cli "grep -E 'SUM|receiver' /tmp/mb.txt 2>/dev/null" 2>&1 | grep -vE 'fetching|Warning:' | tail -1)"
+  echo "  srvCPU: $(samp_max S)  rtrCPU: $(samp_max R)"
 }
 
 
@@ -196,7 +243,7 @@ ensure_rmem() {
 }
 
 # =============================================================================
-CMDRUN="latency|hetero|collapse3|multistream|profile|clean"
+CMDRUN="latency|hetero|collapse3|measure|multistream|profile|clean"
 
 case "$CMD" in
   clean)
@@ -207,38 +254,23 @@ case "$CMD" in
     ;;
   latency)
     MS="${1:-50}"; RATE="${2:-800}"; SEC="${3:-15}"; DIR="${4:-down}"
-    ensure_iperfd_mnet; ensure_rmem; ship_common; clear_netem; apply_uniform "$MS"
-    sleep 8
-    ssh_cli "ping -c 2 -W 3 $TARGET 2>&1 | tail -1" 2>/dev/null | tail -1
-    samp_start "$((SEC + 6))"
-    out=$(run_udp "$RATE" "$DIR" "$SEC")
-    sleep 1
-    echo "== ${DIR} ${RATE}M @ ${MS}ms =="
-    echo "  iperf : $out"
-    echo "  srvCPU: $(samp_max S)  rtrCPU: $(samp_max R)"
+    clear_netem; apply_uniform "$MS"; sleep 8
+    do_measure tcp 20 "$RATE" "$DIR" "$SEC"
     ;;
   hetero)
     RATE="${1:-800}"; SEC="${2:-15}"; DIR="${3:-down}"
-    ensure_iperfd_mnet; ensure_rmem; ship_common; clear_netem; apply_hetero
-    sleep 8
-    samp_start "$((SEC + 6))"
-    out=$(run_udp "$RATE" "$DIR" "$SEC")
-    sleep 1
-    echo "== hetero ${DIR} ${RATE}M =="
-    echo "  iperf : $out"
-    echo "  srvCPU: $(samp_max S)  rtrCPU: $(samp_max R)"
+    clear_netem; apply_hetero; sleep 8
+    do_measure tcp 20 "$RATE" "$DIR" "$SEC"
     ;;
   collapse3)
-    RATE="${1:-800}"; SEC="${2:-15}"; DIR="${3:-down}"
-    ensure_iperfd_mnet; ensure_rmem; ship_common; clear_netem; apply_collapse3
-    sleep 8
-    ssh_cli "ping -c 2 -W 3 $TARGET 2>&1 | tail -1" 2>/dev/null | tail -1
-    samp_start "$((SEC + 6))"
-    out=$(run_udp "$RATE" "$DIR" "$SEC")
-    sleep 1
-    echo "== collapse3 ${DIR} ${RATE}M (A=30 B=42+jit C=35) =="
-    echo "  iperf : $out"
-    echo "  srvCPU: $(samp_max S)  rtrCPU: $(samp_max R)"
+    clear_netem; apply_collapse3; sleep 8
+    do_measure tcp 1 1200 down 15
+    do_measure tcp 20 1200 down 15
+    do_measure udp 20 1500 down 15
+    ;;
+  measure)
+    PROTO="${1:-tcp}"; P="${2:-20}"; RATE="${3:-1200}"; DIR="${4:-down}"; SEC="${5:-15}"
+    do_measure "$PROTO" "$P" "$RATE" "$DIR" "$SEC"
     ;;
   multistream)
     N="${1:-10}"; SEC="${2:-20}"
@@ -255,7 +287,7 @@ case "$CMD" in
     # ECMP で複数コンテナに分散 → 全 mqvpn プロセスを対象に (ホスト perf は
     # コンテナプロセスへホスト PID でアタッチできる)
     ssh_srv "rm -f ${PERFDATA}; sudo -n bash -c 'p=\$(pgrep -x mqvpn | paste -sd, -); [ -n \"\$p\" ] || { echo no-mqvpn >/tmp/perf-record.log; exit 1; }; nohup ${PERF} record -F 99 -e cpu-clock -g -p \$p -o ${PERFDATA} -- sleep $((SEC + 4)) >/tmp/perf-record.log 2>&1 &'" >/dev/null 2>&1
-    out=$(run_udp "$RATE" "$DIR" "$SEC")
+    out=$(do_measure udp 20 "$RATE" "$DIR" "$SEC" 2>&1)
     sleep 5
     echo "== profile ${DIR} ${RATE}M @ ${MS}ms =="
     echo "  iperf : $out"

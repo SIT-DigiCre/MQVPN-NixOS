@@ -16,6 +16,7 @@ in stdenv.mkDerivation {
 
   patches = [
     ../patches/mqvpn-max-paths.patch
+    ../patches/xquic-wlb-rate-weight.patch
     ../patches/xquic-reinjection-scan.patch
     # トレードオフ: 再注入スキャンをモード毎に2msに間引き(要CPU削減)。
     # 対価は (1) 再注入の遅延上界 +≤2ms — deadline(実質20ms下限) や
