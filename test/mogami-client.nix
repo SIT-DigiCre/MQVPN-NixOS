@@ -60,7 +60,7 @@
 
   security.sudo.wheelNeedsPassword = false;
 
-  networking.firewall.enable = false;
+  networking.firewall.allowedTCPPorts = [ 22 ];
 
   environment.systemPackages = with pkgs; [
     curl

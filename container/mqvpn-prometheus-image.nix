@@ -6,6 +6,11 @@ let
   # prometheus.yml (scrape targets は compose の mqvpn-server-* から自動生成) を
   # 1 レイヤ焼き込む。
   #
+  # ネットワークモデル: prometheus は network_mode: host (compose 側) で動かし、
+  # サーバー同様にホスト netns を共有する。exporter はホストの
+  # 127.0.0.1:9091+idx*2 で待つため、スクレイプは常に loopback で完結する
+  # (ブリッジを経由しない → UFW 等の INPUT 制限・サブネット変動の影響を受けない)。
+  #
   # NOTE: この nixpkgs の buildLayeredImage + fromImage は base config のうち
   # Env しか継承しない (Entrypoint/Cmd/User/Volumes 等は落ちる) ため、
   # 必要フィールドは明示する。値はピンした v3.14.0 の Dockerfile/config 由来。
@@ -18,34 +23,11 @@ let
     outputHashAlgo = "sha256";
   };
 
-  # 起動 wrapper: コンテナのデフォルトゲートウェイ (= ホスト, host-net での
-  # exporter の待受アドレス) を ip route から求め、prometheus.yml 内の
-  # ${MQVPN_EXPORTER_HOST} を sed で差し替えてから prometheus を起動する。
-  # IP を焼き込まないので docker bridge サブネットが変わっても追従する。
-  entrypoint = pkgs.writeScript "mqvpn-prometheus-entrypoint" ''
-    #!/bin/sh
-    GW=$(ip route 2>/dev/null | awk '/^default/ {print $3; exit}')
-    if [ -z "$GW" ]; then
-      GW=172.17.0.1
-    fi
-    sed 's|''${MQVPN_EXPORTER_HOST}|'"$GW"'|g' \
-      /etc/prometheus/prometheus.yml > /tmp/prometheus.yml
-    exec /bin/prometheus "$@"
-  '';
-
-  # writeScript の出力は単一ファイル。buildLayeredImage は contents をルートへ
-  # マージするため単一ファイルは "Not a directory" で失敗する。ディレクトリで
-  # ラップする (サーバーイメージと同じ作法)
-  entrypointLayer = pkgs.runCommand "mqvpn-prometheus-entrypoint-layer" { } ''
-    mkdir -p $out
-    cp ${entrypoint} $out/mqvpn-prometheus-entrypoint
-    chmod +x $out/mqvpn-prometheus-entrypoint
-  '';
-
   # prometheus.yml を生成して /etc/prometheus/ に配置するレイヤ。
   # mqvpn job の targets は compose の mqvpn-server-* サービス + その
-  # MQVPN_INSTANCE_IDX から自動生成する (host-net では exporter ポートが
-  # インスタンスごとに違う: 9091+idx*2。instance ラベルはサービス名に固定)。
+  # MQVPN_INSTANCE_IDX から自動生成する: 127.0.0.1:(9091+idx*2)。
+  # instance ラベルはサービス名に固定する (Grafana の Server 変数 =
+  # label_values(mqvpn_build_info, instance) と焼き込み済み初期選択が一致する)。
   prometheusConf =
     pkgs.runCommand "mqvpn-prometheus-etc"
       {
@@ -71,14 +53,14 @@ let
         assert services, "compose に mqvpn-server-* (MQVPN_INSTANCE_IDX) が見つからない"
         tmpl = open("${./prometheus/prometheus.yml.template}").read()
         blocks = "\n".join(
-            '      - targets:\n          - "''${{MQVPN_EXPORTER_HOST}}:{p}"\n'
+            '      - targets:\n          - "127.0.0.1:{p}"\n'
             '        labels:\n          instance: {n}\n          stack: mqvpn'.format(
                 p=9091 + idx * 2, n=n)
             for n, idx in services
         )
         # テンプレートの見本ブロック全体 (- targets: 〜) を生成分へ置き換える。
         # 先頭の - targets: を残して後続を差し込むと二重化するため、見本を
-        # 丸ごと破棄して generate 分を static_configs: 直下に置く
+        # 丸ごと破棄して生成分を static_configs: 直下に置く
         head, sep, tail = tmpl.partition("      - targets:")
         assert sep, "prometheus.yml.template に - targets: ブロックが見つからない"
         out_y = head + blocks + "\n"
@@ -93,21 +75,21 @@ let
     name = "mqvpn-prometheus";
     tag = "latest";
     fromImage = prometheusBase;
-    contents = [
-      prometheusConf
-      entrypointLayer
-      pkgs.iproute2 # wrapper が ip route でゲートウェイを取得するため
-    ];
+    contents = [ prometheusConf ];
     config = {
       User = "nobody"; # 公式イメージと同一 (tsdb パスは 3.14.0 では nobody 所有)
-      Entrypoint = [ "${entrypointLayer}/mqvpn-prometheus-entrypoint" ];
+      Entrypoint = [ "/bin/prometheus" ];
       Cmd = [
-        "--config.file=/tmp/prometheus.yml"
+        "--config.file=/etc/prometheus/prometheus.yml"
+        # loopback 限定で公開しない。ポートは control API (9090+idx*2) /
+        # exporter (9091+idx*2) の家族 (9090..9217) と重ならない 9000 を固定
+        # (9100 だと idx=5 の control API と衝突する)
+        "--web.listen-address=127.0.0.1:9000"
         "--storage.tsdb.path=/prometheus"
       ];
       WorkingDir = "/prometheus";
       ExposedPorts = {
-        "9090/tcp" = { };
+        "9000/tcp" = { };
       };
       Volumes = {
         "/prometheus" = { };

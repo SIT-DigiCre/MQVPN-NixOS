@@ -5,7 +5,7 @@
 }:
 # "実ネットワーク側" の VM (ベンチターゲット): サーバーのトンネル出口先。
 # 専用サブネット (192.168.100.0/24) は他 VM のどの経路にも含まれないため、
-# クライアント→トンネル→コンテナ NAT→docker0→server VM→ここ、の
+# クライアント→トンネル→コンテナ NAT→server VM eth2→ここ、の
 # フルチェーンを漏れなく測定できる。
 {
   networking.hostName = lib.mkForce "mogami-mnet";
@@ -34,16 +34,6 @@
     ];
   };
 
-  # iperfd からの返送先はコンテナ NAT 元 (172.17.0.0/16, docker0) —
-  # server VM 経由で戻る。
-  networking.interfaces.eth0.ipv4.routes = [
-    {
-      address = "172.17.0.0";
-      prefixLength = 16;
-      via = "192.168.100.2";
-    }
-  ];
-
   services.openssh = {
     enable = true;
     settings = {
@@ -62,7 +52,23 @@
 
   security.sudo.wheelNeedsPassword = false;
 
-  networking.firewall.enable = false;
+  networking.firewall.allowedTCPPorts = [
+    22
+    6205
+  ];
+  networking.firewall.allowedUDPPorts = [ 6205 ];
+  networking.firewall.allowedTCPPortRanges = [
+    {
+      from = 5201;
+      to = 5300;
+    }
+  ];
+  networking.firewall.allowedUDPPortRanges = [
+    {
+      from = 5201;
+      to = 5300;
+    }
+  ];
   boot.initrd.systemd.enable = false;
 
   system.stateVersion = "26.05";

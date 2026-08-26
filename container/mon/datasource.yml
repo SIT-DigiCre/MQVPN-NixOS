@@ -1,8 +1,10 @@
+# grafana / prometheus とも network_mode: host のため、datasource はホストの
+# loopback で prometheus (web port 9000, loopback 限定バインド) を指す
 apiVersion: 1
 datasources:
   - name: Prometheus
     uid: "prometheus"
     type: prometheus
-    url: http://prometheus:9090
+    url: http://127.0.0.1:9000
     access: proxy
     isDefault: true

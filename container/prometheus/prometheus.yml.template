@@ -3,12 +3,10 @@
 # mqvpn job の targets はビルド時に compose の mqvpn-server-* から自動生成・
 # 焼き込みされる (サーバー追加が compose 1 カ所で済む)。
 #
-# host-net 運用のため target のホスト部はビルド時には決まらず、起動時に
-# prometheus コンテナのデフォルトゲートウェイ (= ホスト) へ wrapper が
-# ${MQVPN_EXPORTER_HOST} を sed で差し替える。ポートは MQVPN_INSTANCE_IDX
-# から 9091+idx*2 で自動導出。instance ラベルはサービス名に固定する
-# (ダッシュボードの Server 変数 = label_values(mqvpn_build_info, instance) と
-# 焼き込み済み初期選択が一致するようにする)。
+# prometheus は network_mode: host で動くため、exporter (ホストの
+# 127.0.0.1:9091+idx*2) を loopback で直接スクレイプする。ブリッジが無いので
+# ホストのファイアウォールやサブネット変動の影響を受けない。
+# instance ラベルはサービス名に固定する (Grafana の Server 変数と一致させる)。
 # 下記 targets は見本 (スタンドアロンで image を自作する場合の記入例)。
 # exporter の -mqvpn.scrape-budget=25s (制御 API は高負荷時に秒単位へ劣化) に
 # 合わせ、timeout は 30s に余裕を持たせる
@@ -20,7 +18,7 @@ scrape_configs:
   - job_name: mqvpn
     static_configs:
       - targets:
-          - "${MQVPN_EXPORTER_HOST}:9091"
+          - "127.0.0.1:9091"
         labels:
           instance: mqvpn-server-0
           stack: mqvpn

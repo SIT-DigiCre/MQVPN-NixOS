@@ -201,7 +201,14 @@ in
 
   security.sudo.wheelNeedsPassword = false;
 
-  networking.firewall.enable = false;
+  networking.firewall.allowedTCPPorts = [
+    22 # SSH
+    3000 # grafana (browser アクセス用)
+  ];
+  networking.firewall.allowedUDPPorts = [
+    443
+    444
+  ];
 
   boot.initrd.systemd.enable = false;
 
