@@ -120,6 +120,16 @@ in
   # net.* sysctl はコンテナから書けないためホスト側で有効化
   boot.kernel.sysctl."net.ipv4.ip_forward" = 1;
 
+  # host-net コンテナの mqvpn-server-nat.sh は「デフォルトルートの iface」
+  # (= mgmt eth0) だけを MASQUERADE 対象にする。ベンチの ext 島 (192.168.100.0/24,
+  # eth2 経由) へ抜ける復路が mnet でルーティング不能になるため、トンネル src の
+  # eth2 向け SNAT を追加する (実機サーバーでは WAN がデフォルト iface なので不要)。
+  networking.nat = {
+    enable = true;
+    externalInterface = "eth2";
+    internalInterfaces = [ "mqvpn0" "mqvpn1" ];
+  };
+
   virtualisation.docker.enable = true;
   virtualisation.docker.autoPrune.enable = true;
   virtualisation.diskSize = 12288;
