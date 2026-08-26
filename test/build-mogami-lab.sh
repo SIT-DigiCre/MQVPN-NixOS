@@ -35,17 +35,18 @@ nix build "path:$REPO_DIR#nixosConfigurations.mogami-mnet.config.system.build.vm
 ln -sf /tmp/result-mnet "$SCRIPT_DIR/result-mnet" 2>/dev/null || true
 
 echo "=== cleanup stale interfaces ==="
-for tap in trw0 trw1 trw2 trw3 trw4 trw5 trw6 trw7 trw8 trw9 trw10 trw11 ts-mq tr-mgmt ts-mgmt tc-mgmt tm-ext ts-ext tm-mgmt; do
+for tap in trw0 trw1 trw2 trw3 trw4 trw5 trw6 trw7 trw8 trw9 trw10 trw11 ts-mgmt ts-mq tr-mgmt tc-mgmt tm-ext ts-ext tm-mgmt; do
   sudo ip link delete "$tap" 2>/dev/null || true
 done
 sudo ip link delete mqvpn-srv-br0 2>/dev/null || true
+sudo ip link delete mqvpn-srv2-br0 2>/dev/null || true
 sudo ip link delete mq-mgmt-br0 2>/dev/null || true
 sudo ip link delete mq-ext-br0 2>/dev/null || true
 sudo ip link delete $TAP_CLIENT 2>/dev/null || true
 sudo ip link delete $TAP_ROUTER 2>/dev/null || true
 sudo ip link delete $BRIDGE 2>/dev/null || true
 
-echo "=== creating server bridge: mqvpn-srv-br0 (10.200.0.0/24) ==="
+echo "=== creating WAN bridge: mqvpn-srv-br0 (per-WAN /24 GW = ISP シム) ==="
 sudo ip link add mqvpn-srv-br0 type bridge
 sudo ip link set mqvpn-srv-br0 up
 for tap in trw0 trw1 trw2 trw3 trw4 trw5 trw6 trw7 trw8 trw9 trw10 trw11; do
@@ -54,10 +55,25 @@ for tap in trw0 trw1 trw2 trw3 trw4 trw5 trw6 trw7 trw8 trw9 trw10 trw11; do
   sudo ip link set "$tap" up
   echo "  $tap -> mqvpn-srv-br0"
 done
+# 各 WAN 用ゲートウェイをホストが保持 (10.200.i.1/24)。ルーター WAN NIC は
+# 静的デフォルトルートでこの GW を経由し、サーバー(10.200.99.2)へ抜ける
+# → 本番の「WAN は ISP 経由でサーバーへ抜ける」と同形状 (DHCP は不要)。
+for i in $(seq 0 11); do
+  sudo ip addr add "10.200.$i.1/24" dev mqvpn-srv-br0 2>/dev/null || true
+  done
+
+echo "=== creating server bridge: mqvpn-srv2-br0 (10.200.99.0/24, ルーターから経路越し) ==="
+sudo ip link add mqvpn-srv2-br0 type bridge
+sudo ip link set mqvpn-srv2-br0 addr 02:00:00:50:00:03
+sudo ip addr add 10.200.99.1/24 dev mqvpn-srv2-br0 2>/dev/null || true
+sudo ip link set mqvpn-srv2-br0 up
 sudo ip tuntap add ts-mq mode tap user "$USER"
-sudo ip link set ts-mq master mqvpn-srv-br0
+sudo ip link set ts-mq master mqvpn-srv2-br0
 sudo ip link set ts-mq up
-echo "  ts-mq -> mqvpn-srv-br0"
+echo "  ts-mq -> mqvpn-srv2-br0"
+# ルーター<->サーバー間転送を許可 (非NAT: サーバーが WAN 側実 IP をそのまま見る)
+sudo iptables -I FORWARD -i mqvpn-srv-br0 -o mqvpn-srv2-br0 -j ACCEPT 2>/dev/null || true
+sudo iptables -I FORWARD -i mqvpn-srv2-br0 -o mqvpn-srv-br0 -j ACCEPT 2>/dev/null || true
 
 echo "=== creating LAN bridge: $BRIDGE ==="
 sudo ip link add $BRIDGE type bridge
@@ -87,7 +103,6 @@ done
 # やルーター (192.168.50.1) が万一 mgmt 経由で送信しても実ネットワークへ出られない。
 echo "$(cat /proc/sys/net/ipv4/ip_forward)" > /tmp/mqvpn-ipforward 2>/dev/null || true
 sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null
-sudo sysctl -w net.ipv4.conf.mq-mgmt-br0.forwarding=1 >/dev/null
 realif=$(ip route get 8.8.8.8 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i=="dev") { print $(i+1); exit } }')
 if [ -n "$realif" ]; then
   sudo iptables -t nat -C POSTROUTING -s 192.168.50.2 -o "$realif" -j MASQUERADE 2>/dev/null ||
@@ -114,7 +129,8 @@ done
 
 echo ""
 echo "=== done ==="
-echo "WAN: 12x tap via mqvpn-srv-br0 -> server VM (10.200.0.1)"
+echo "WAN: 12x tap via mqvpn-srv-br0 (static /24, GW 10.200.i.1 = ISP シム) -> host -> mqvpn-srv2-br0"
+echo "Server: ts-mq via mqvpn-srv2-br0 (10.200.99.2, ルーターから経路越し)"
 echo "LAN: $TAP_ROUTER + $TAP_CLIENT via $BRIDGE (172.16.0.0/12)"
 echo "Mgmt: 4x tap via mq-mgmt-br0 (192.168.50.1 router / .2 server / .3 client / .4 mnet)"
 echo "Ext: tm-ext + ts-ext via mq-ext-br0 (192.168.100.1 mnet / .2 server)"

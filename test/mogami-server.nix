@@ -10,7 +10,7 @@ let
   vmWanInterface = "eth0";
   mqvpnServerSubnet = "192.168.0.0/24";
   mqvpnAuthKey = "mqvpn-test-key-2024";
-  localIp = "10.200.0.1";
+  localIp = "10.200.99.2";
 
   mqvpnImage = (import ../container/mqvpn-server-image.nix { inherit pkgs; }).image;
   mqvpnPromImage = (import ../container/mqvpn-prometheus-image.nix { inherit pkgs; }).image;
@@ -96,6 +96,17 @@ in
       {
         address = localIp;
         prefixLength = 24;
+      }
+    ];
+    # サーバーは mqvpn-srv2-br0 (10.200.99.0/24) に居り、ルーターからは
+    # ホスト(ISP シム)経由の経路で到達する (WAN ブリッジ mqvpn-srv-br0 には非隣接)。
+    # 各 WAN /24 (10.200.i.0/24) はホスト(10.200.99.1)経由で到達し、トンネル復路
+    # (サーバー → クライアントの WAN IP) が通る。
+    ipv4.routes = [
+      {
+        address = "10.200.0.0";
+        prefixLength = 16;
+        via = "10.200.99.1";
       }
     ];
   };

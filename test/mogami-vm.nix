@@ -1,6 +1,7 @@
 {
   config,
   lib,
+  pkgs,
   ...
 }: let
   # 管理ネットワークは専用 tap ブリッジ mq-mgmt-br0 (192.168.50.0/24)。
@@ -15,21 +16,6 @@
   vmMgmtInterface = "eth2";
   vmWanInterfaces = ["eth1" "eth3" "eth4" "eth5" "eth6" "eth7" "eth8" "eth9" "eth10" "eth11" "eth12" "eth13"];
   vmMgmtAddr = "192.168.50.1";
-  # ECMP 対象の WAN: eth 番号 → サーバーブリッジ側アドレス
-  vmWanAddresses = {
-    eth1 = "10.200.0.2";
-    eth3 = "10.200.0.3";
-    eth4 = "10.200.0.4";
-    eth5 = "10.200.0.5";
-    eth6 = "10.200.0.6";
-    eth7 = "10.200.0.7";
-    eth8 = "10.200.0.8";
-    eth9 = "10.200.0.9";
-    eth10 = "10.200.0.10";
-    eth11 = "10.200.0.11";
-    eth12 = "10.200.0.12";
-    eth13 = "10.200.0.13";
-  };
 
   # q35 の既定 NIC スロット上限(~8)を超えるため、各 NIC を明示的な PCIe
   # root port に付ける。前提: マシンは q35 (ルートバス名 pcie.0) であること。
@@ -49,14 +35,17 @@
     { tap = "trw8";    mac = "52:54:00:12:34:64"; }
     { tap = "trw9";    mac = "52:54:00:12:34:65"; }
     { tap = "trw10";   mac = "52:54:00:12:34:66"; }
-    { tap = "trw11";   mac = "52:54:00:12:34:67"; }
+    { tap = "trw11";   mac = "52:54:00:12:34:68"; }
   ];
 in {
   networking.hostName = lib.mkForce "mogami-vm";
 
   networking.useDHCP = false;
 
-  # LAN / mgmt / WAN の静的設定
+  # LAN / mgmt は静的。WAN は本番同様に自ゲートウェイ(10.200.i.1)をデフォルト経由で持つ。
+  # この per-WAN デフォルトがキーパー(mqvpn-ecmp-assert)の `ip route show dev <wan> default`
+  # によるゲートウェイ発見のソース。DHCP は不要(キーパーは dhcpcd にもフォールバックするが、
+  # 静的デフォルトで十分かつ確実)。
   networking.interfaces = lib.mkMerge [
     {
       "${vmLanInterface}" = {
@@ -68,15 +57,32 @@ in {
         ipv4.addresses = [{ address = vmMgmtAddr; prefixLength = 24; }];
       };
     }
-    (lib.mapAttrs' (iface: addr: {
-      name = iface;
-      value = {
-        useDHCP = false;
-        ipv4.addresses = [{ address = addr; prefixLength = 24; }];
-      };
-    })
-    vmWanAddresses)
+    (lib.listToAttrs (lib.imap0 (i: name: lib.nameValuePair name {
+      useDHCP = false;
+      ipv4.addresses = [{ address = "10.200.${toString i}.2"; prefixLength = 24; }];
+    }) vmWanInterfaces))
   ];
+
+  # 各 WAN のデフォルトルート(ゲートウェイ 10.200.i.1、独自 metric で 12 本共存)は
+  # mqvpn-wan-gateway-routes サービスで張る。NixOS の ipv4.routes は metric を受け付けない
+  # ため ip route で直接張る。キーパー(mqvpn-ecmp-assert)が `ip route show dev <wan> default`
+  # で各 WAN のゲートウェイを発見し、サーバーを /32 でピンするために必要。
+  systemd.services.mqvpn-wan-gateway-routes = {
+    wantedBy = [ "multi-user.target" ];
+    wants = [ "network-online.target" ];
+    after = [ "network-online.target" ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+    };
+    script = let
+      cmds = lib.concatStringsSep "\n" (lib.imap0 (i: name: ''
+        ${pkgs.iproute2}/bin/ip route replace default via 10.200.${toString i}.1 dev ${name} metric ${toString (i + 1)}
+      '') vmWanInterfaces);
+    in ''
+      ${cmds}
+    '';
+  };
 
   # qemu の NIC 構成を完全に明示 (ビルダー既定の user-net を含め一切自動追加させない)。
   # MAC は 3 VM 間で共有ブリッジ上ユニークになるよう明示 (-nic の MAC 省略時は
@@ -90,8 +96,9 @@ in {
   );
 
   # auth はシークレットのみ (server_addr は IP のみ、port は公開オプション clientPorts で指定)
+  # サーバーはルーターから L2 隣接でなく、ホスト(ISP シム)経由の経路にある
   services.mqvpn.auth = {
-    server_addr = "10.200.0.1";
+    server_addr = "10.200.99.2";
     auth_key = "mqvpn-test-key-2024";
   };
 

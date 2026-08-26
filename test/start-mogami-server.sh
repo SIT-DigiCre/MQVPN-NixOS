@@ -5,7 +5,7 @@ SERVER_VM="$(readlink -f /tmp/result-server)/bin/run-mogami-server-vm"
 
 echo "=== starting server VM ==="
 echo "  SSH  : ssh digicre@192.168.50.2  (password: server)"
-echo "  WAN  : ts-mq -> mqvpn-srv-br0 -> router VM"
+echo "  WAN  : ts-mq -> mqvpn-srv2-br0 (10.200.99.2) -> host -> router VM"
 echo "  Mgmt : ts-mgmt -> mq-mgmt-br0 "
 echo ""
 
