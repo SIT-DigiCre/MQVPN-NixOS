@@ -96,6 +96,35 @@ rtr_wan=($(nix eval --json "path:$(cd "$SCRIPT_DIR/.." && pwd)#nixosConfiguratio
 
 clear_netem() {
   ssh_rtr "for i in ${rtr_wan[*]}; do sudo -n tc qdisc del dev \$i root 2>/dev/null || true; done; echo netem-cleared" 2>/dev/null || true
+  clear_netem_host
+}
+# 下り(down)は server→router のトンネルパケットが host の WAN タップ egress を通る。
+# router 側 egress netem は上りしか絞らないため、下りを絞るには host 側タップの
+# egress に netem を掛ける。mqvpn.interfaces = [eth1,eth3,eth4] の実タップは
+# mogami-vm.nix allNics の順: eth1=trw0, eth3=trw1, eth4=trw2  (eth2 は tr-mgmt)。
+host_wan=(trw0 trw1 trw2)
+clear_netem_host() {
+  for t in "${host_wan[@]}"; do sudo -n tc qdisc del dev "$t" root 2>/dev/null || true; done; echo netem-cleared-host
+}
+apply_uniform_host() {
+  local ms="$1"
+  for t in "${host_wan[@]}"; do sudo -n tc qdisc replace dev "$t" root netem delay ${ms}ms limit 100000; done; echo applied-host
+}
+apply_hetero_host() {
+  local p
+  for i in "${!host_wan[@]}"; do
+    if [ "$i" -lt 5 ]; then p="delay 45ms 12ms loss 1%"
+    elif [ "$i" -lt 10 ]; then p="delay 75ms 25ms loss 0.5%"
+    else p="delay 15ms 4ms loss 0.2%"
+    fi
+    sudo -n tc qdisc replace dev "${host_wan[$i]}" root netem $p limit 100000
+  done; echo applied-host
+}
+apply_collapse3_host() {
+  local specs=("delay 30ms rate 458mbit" "delay 42ms 15ms distribution pareto rate 400mbit" "delay 35ms rate 450mbit")
+  for i in "${!host_wan[@]}"; do
+    sudo -n tc qdisc replace dev "${host_wan[$i]}" root netem ${specs[$i]} limit 100000
+  done; echo applied-host
 }
 
 apply_uniform() {
@@ -296,16 +325,16 @@ case "$CMD" in
     ;;
   latency)
     MS="${1:-50}"; RATE="${2:-800}"; SEC="${3:-15}"; DIR="${4:-down}"
-    clear_netem; apply_uniform "$MS"; sleep 8
+    clear_netem; apply_uniform "$MS"; apply_uniform_host "$MS"; sleep 8
     do_measure tcp 20 "$RATE" "$DIR" "$SEC"
     ;;
   hetero)
     RATE="${1:-800}"; SEC="${2:-15}"; DIR="${3:-down}"
-    clear_netem; apply_hetero; sleep 8
+    clear_netem; apply_hetero; apply_hetero_host; sleep 8
     do_measure tcp 20 "$RATE" "$DIR" "$SEC"
     ;;
   collapse3)
-    clear_netem; apply_collapse3; sleep 8
+    clear_netem; apply_collapse3; apply_collapse3_host; sleep 8
     do_measure tcp 1 1200 down 15
     do_measure tcp 20 1200 down 15
     do_measure udp 20 1500 down 15
@@ -321,7 +350,7 @@ case "$CMD" in
     ;;
   profile)
     MS="${1:-50}"; RATE="${2:-800}"; SEC="${3:-15}"; DIR="${4:-down}"
-    ensure_iperfd_mnet; ensure_rmem; ship_common; clear_netem; apply_uniform "$MS"
+    ensure_iperfd_mnet; ensure_rmem; ship_common; clear_netem; apply_uniform "$MS"; apply_uniform_host "$MS"
     sleep 8
     PERF=$(ssh_srv "command -v perf 2>/dev/null | tail -1")
     [ -n "$PERF" ] || { echo "perf not found on server"; exit 1; }
