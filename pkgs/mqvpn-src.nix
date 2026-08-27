@@ -17,6 +17,9 @@ in stdenv.mkDerivation {
   patches = [
     ../patches/mqvpn-max-paths.patch
     ../patches/xquic-wlb-capacity-pinning.patch
+    # ① ピン選択への軽い低RTT優遇 (容量比例ベースライン上)。P1 の regression 教訓から独立 revert 可能に。
+    # 検証ゲート: latab (目的B 回復) + 等帯域 collapse ベンチ (目的A 悪化なし)。
+    ../patches/xquic-wlb-rtt-favor.patch
     ../patches/xquic-reinjection-scan.patch
     # トレードオフ: 再注入スキャンをモード毎に2msに間引き(要CPU削減)。
     # 対価は (1) 再注入の遅延上界 +≤2ms — deadline(実質20ms下限) や

@@ -1,0 +1,65 @@
+--- a/third_party/xquic/src/transport/scheduler/xqc_scheduler_wlb.c
++++ b/third_party/xquic/src/transport/scheduler/xqc_scheduler_wlb.c
+@@ -56,6 +56,7 @@
+  * heap-allocated scheduler struct, no longer relevant for stack frames. */
+ #define WLB_MAX_PATHS         XQC_PATH_HARD_CAP
+ #define WLB_EXPLORE_EVERY     8       /* every Nth pin → least-recently-pinned path (exploration/anti-starvation) */
++#define WLB_RTT_FLOOR_PERMIL  800     /* ① mild low-RTT pin bias floor (0.80× worst case); 1000 = capacity-only */
+ 
+ /* Flow table — open-addressing hash table for flow-to-path pinning */
+ #define WLB_FLOW_TABLE_SIZE   4096
+@@ -618,6 +619,21 @@
+  * wlb_wrr_select() which honours cwnd. Does not decrement the per-packet
+  * deficit (the pin is metadata only).
+  */
++/**
++ * ① Read the smoothed RTT (usec) of a path for the mild low-RTT pin bias.
++ * Returns 0 if unavailable. Reuses wlb_find_path_ctx so the healthy/active
++ * predicate stays consistent with the rest of the scheduler.
++ */
++static uint64_t
++wlb_path_srtt(xqc_connection_t *conn, uint64_t path_id)
++{
++    xqc_path_ctx_t *path = wlb_find_path_ctx(conn, path_id);
++    if (path == NULL || path->path_send_ctl == NULL) {
++        return 0;
++    }
++    return xqc_send_ctl_get_srtt(path->path_send_ctl);
++}
++
+ static uint64_t
+ wlb_pick_pin_path(xqc_wlb_scheduler_t *s, xqc_connection_t *conn)
+ {
+@@ -645,12 +661,31 @@
+         }
+     }
+ 
+-    /* Capacity-proportional WDRR by est_bw weight. */
++    /* Capacity-proportional WDRR by est_bw weight, with a MILD low-RTT bias on
++     * the PIN TARGET only (objective B: latency). Anchor = fastest path (factor
++     * 1000); slower paths scaled down but band-limited to [WLB_RTT_FLOOR_PERMIL,
++     * 1000] so capacity-evening (est_bw) still dominates and no path is starved.
++     * No 1/2-floor (that over-allocated slow paths before). The exploration slot
++     * above is the separate anti-starvation safety net. */
++    uint64_t min_srtt = UINT64_MAX;
++    for (int i = 0; i < n; i++) {
++        uint64_t r = wlb_path_srtt(conn, s->paths[i].path_id);
++        if (r > 0 && r < min_srtt) {
++            min_srtt = r;
++        }
++    }
+     int64_t best_c = INT64_MIN;
+     int best = -1;
+     uint64_t total_w = 0;
+     for (int i = 0; i < n; i++) {
+         uint64_t eff = s->paths[i].weight ? s->paths[i].weight : 1;
++        uint64_t rtt = wlb_path_srtt(conn, s->paths[i].path_id);
++        if (rtt > 0 && min_srtt != UINT64_MAX && min_srtt < rtt) {
++            int64_t f = (int64_t)(min_srtt * 1000 / rtt);  /* 1000 at fastest */
++            if (f > 1000) f = 1000;
++            if (f < WLB_RTT_FLOOR_PERMIL) f = WLB_RTT_FLOOR_PERMIL;
++            eff = eff * (uint64_t)f / 1000;
++        }
+         s->paths[i].pin_credit += (int64_t)eff;
+         total_w += eff;
+         if (s->paths[i].pin_credit > best_c) {
