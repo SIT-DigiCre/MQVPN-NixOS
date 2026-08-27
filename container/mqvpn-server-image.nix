@@ -64,6 +64,8 @@ let
       pkgs.gnugrep
       pkgs.gawk
       pkgs.jq
+      # 運用測定用 (デーモンとしては起動しない。必要時に docker exec で -s を立てる)
+      pkgs.iperf3
     ];
     pathsToLink = [ "/bin" ];
     ignoreCollisions = true;
