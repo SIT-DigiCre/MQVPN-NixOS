@@ -53,7 +53,7 @@ set -euo pipefail
 #       推定器の収束確認用: 計測前にこれで est_bw が安定していることを目視確認する。
 #
 #   計測の前提 (WLB 推定器の収束):
-#     - do_measure / do_latab は BENCH_WARMUP 秒 (既定 60, 環境変数で調整) の
+#     - do_measure / do_latab は BENCH_WARMUP 秒 (既定 20, 環境変数で調整) の
 #       負荷ウォームアップ後にのみ計測窓を置く。iperf3 --omit でレポートも除外。
 #       これは「推定帯域幅が整う前の過渡状態を性能として測ってしまう」問題への対処。
 #     - est_bw の収束は bench.sh wlbstate で確認できる。収束が遅い回線なら
@@ -433,7 +433,7 @@ emit_bench_json() {
 #   [B0 → B1] の差分でのみ集計する。
 #   ウォームアップは既定で「適応的」: bench.sh wlbstate の推定器プロクシを用い、
 #   per-path 実測レートが BENCH_STEADY_PCT(既定15)% 以内に 2 回連続安定するまで待つ。
-#   最小 BENCH_WARMUP(既定60) / 最大 BENCH_WARMUP_MAX(既定 2x) で挟む。
+#   最小 BENCH_WARMUP(既定20) / 最大 BENCH_WARMUP_MAX(既定45) で挟む。
 #   固定ウォームアップに戻す: BENCH_ADAPTIVE_WARMUP=0。
 #   収束の目視確認は bench.sh wlbstate。連続計測間のスケジューラ状態引き継ぎは
 #   WARMUP が現ネットワークへ吸収する。
@@ -449,7 +449,7 @@ measure_once() {
   local flag="" uflag=""
   local adaptive=0
   [ "${BENCH_ADAPTIVE_WARMUP:-1}" != "0" ] && adaptive=1
-  local warmup_max="${BENCH_WARMUP_MAX:-$(( warmup * 2 ))}"
+    local warmup_max="${BENCH_WARMUP_MAX:-45}"
   [ "$warmup_max" -lt "$warmup" ] && warmup_max=$(( warmup + 30 ))
   [ "$dir" = "down" ] && flag="-R"
   [ "$proto" = "udp" ] && uflag="-u"
@@ -507,7 +507,7 @@ measure_once() {
 
 do_measure() {
   local proto="${1:-tcp}" P="${2:-20}" rate="${3:-1200}" dir="${4:-down}" sec="${5:-15}"
-  local warmup="${BENCH_WARMUP:-60}" runs="${BENCH_RUNS:-1}"
+  local warmup="${BENCH_WARMUP:-20}" runs="${BENCH_RUNS:-1}"
   local out t
   local -a totals=()
   for _ in $(seq 1 "$runs"); do
@@ -581,15 +581,15 @@ do_stagger() {
 #   以下を同時取得する:
 #     - トンネル RTT (負荷下): ping TARGET の p50/p95/p99
 #     - 小パケット UDP jitter: iperf3 -u -l 64 -b 10M (down)
-#   負荷は BENCH_WARMUP (既定 60) 秒間だけ先に流して定常化させ (--omit で除外)、
+#   負荷は BENCH_WARMUP (既定 20) 秒間だけ先に流して定常化させ (--omit で除外)、
 #   ping/jitter と per-path rx はウォームアップ後の定常窓 [B0 → B1] でのみ計測する。
 #   計測対象の過渡状態混入を防ぐため (推定器の収束 ≫ 計測窓 問題への対処)。
 do_latab() {
   local sec="${1:-15}"
-  local label="${2:-latab}" warmup="${BENCH_WARMUP:-60}"
+  local label="${2:-latab}" warmup="${BENCH_WARMUP:-20}"
   local adaptive=0
   [ "${BENCH_ADAPTIVE_WARMUP:-1}" != "0" ] && adaptive=1
-  local warmup_max="${BENCH_WARMUP_MAX:-$(( warmup * 2 ))}"
+    local warmup_max="${BENCH_WARMUP_MAX:-45}"
   [ "$warmup_max" -lt "$warmup" ] && warmup_max=$(( warmup + 30 ))
   local wp=$(( warmup_max + sec + 5 ))
   ensure_iperfd_mnet; ensure_rmem; ensure_wmem_mnet; ship_common
