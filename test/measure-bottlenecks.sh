@@ -11,9 +11,13 @@
 #
 # Usage:
 #   ./test/measure-bottlenecks.sh [duration_sec] [target_ip] [port]
-#     duration_sec : 負荷を流す秒数 (既定 20)
+#     duration_sec : 負荷を流す秒数 (既定 20) — ウォームアップ後の計測窓
 #     target_ip    : iperf 宛先 (既定 192.168.100.1 = mnet)
 #     port         : iperf ポート (既定 6205)
+#     BENCH_WARMUP : 負荷だけ流して捨てる秒数 (既定 30)。
+#                    WLB 推定器 (est_bw 等) は分単位で収束するため、ここで
+#                    「推定器が整う前」を窓から除外する (= 負荷全体は WARMUP+DUR)。
+#                    収束確認: ./test/bench.sh wlbstate
 # =============================================================================
 set -euo pipefail
 
@@ -21,6 +25,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DUR="${1:-20}"
 TARGET="${2:-192.168.100.1}"
 PORT="${3:-6205}"
+WARMUP="${BENCH_WARMUP:-30}"
 
 ssh_srv() { timeout 90 "$SCRIPT_DIR/ssh-server.sh" "$@"; }
 ssh_rtr() { timeout 90 "$SCRIPT_DIR/ssh-router.sh" "$@"; }
@@ -54,10 +59,12 @@ echo "=== [static] mqvpn paths / srtt (latest STATUS) ==="
 ssh_rtr 'sudo journalctl -n 200 --no-pager 2>/dev/null | grep -E "path[0-2]=eth" | tail -3' 2>&1 | grep -vE "fetching|Warning:"
 
 echo
-echo "=== running load: iperf3 -P 20 -R -t $DUR (client -> $TARGET) ==="
-ssh_cli "iperf3 -c $TARGET -p $PORT -P 20 -R -t $DUR > /tmp/mb_iperf.txt 2>&1" &
+echo "=== running load: iperf3 -P 20 -R -t $((WARMUP + DUR)) s (client -> $TARGET) ==="
+printf '(sampling window: steady-state after %ss warmup, window=%ss)\n' "$WARMUP" "$DUR"
+ssh_cli "iperf3 -c $TARGET -p $PORT -P 20 -R -t $((WARMUP + DUR)) --omit $WARMUP > /tmp/mb_iperf.txt 2>&1" &
 IPERF=$!
 
+sleep "$WARMUP"
 for ((i=0; i<DUR; i+=5)); do
   echo "$(snap_bytes)" >> "$BLOG"
   echo "$(snap_srv)"   >> "$SLOG"
@@ -67,7 +74,7 @@ done
 wait "$IPERF" || true
 
 echo
-echo "=== [result] aggregate throughput (client SUM receiver) ==="
+echo "=== [result] aggregate throughput (client SUM receiver; avg over full iperf window WARMUP+DUR — steady figure is per-path TOTAL below) ==="
 ssh_cli "grep 'SUM.*receiver' /tmp/mb_iperf.txt 2>/dev/null" 2>&1 | grep -vE "fetching|Warning:" | tail -1
 
 # --- per-path / per-tunnel スループット ---

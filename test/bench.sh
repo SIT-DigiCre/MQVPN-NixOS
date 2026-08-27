@@ -8,6 +8,10 @@ set -euo pipefail
 # perf プロファイリングも可。
 #
 # Usage:
+#   ./test/bench.sh wlbstate
+#       直近の WLB round_start ログ (est_bw/pin_count 時系列) を両端から表示。
+#       推定器の収束確認用: 計測前にこれで est_bw が安定していることを目視確認する。
+#
 #   ./test/bench.sh clean
 #       ルーター WAN の netem を解除し、サーバー(compose の mqvpn-server-*)
 #       が停止していれば再起動する
@@ -43,11 +47,27 @@ set -euo pipefail
 #       (OCI イメージ同梱のリリースバイナリ。ECMP 全コンテナの mqvpn を対象に
 #       するためシンボル注釈はバイナリ側に無い — 集計は [kernel]/[.] 単位)
 #       注意: perf の CPU 集計は dmesg/perf 権限が要るので sudo 使用 (サーバー側)
+#
+#   ./test/bench.sh wlbstate
+#       直近の WLB round_start ログ (est_bw/pin_count 時系列) を両端から表示。
+#       推定器の収束確認用: 計測前にこれで est_bw が安定していることを目視確認する。
+#
+#   計測の前提 (WLB 推定器の収束):
+#     - do_measure / do_latab は BENCH_WARMUP 秒 (既定 60, 環境変数で調整) の
+#       負荷ウォームアップ後にのみ計測窓を置く。iperf3 --omit でレポートも除外。
+#       これは「推定帯域幅が整う前の過渡状態を性能として測ってしまう」問題への対処。
+#     - est_bw の収束は bench.sh wlbstate で確認できる。収束が遅い回線なら
+#       BENCH_WARMUP を伸ばすこと。
+#     - 連続計測 (collapse3 など) は実行間でスケジューラ状態 (est_bw/pin_credit/
+#       フロー表) を引き継ぐが、WARMUP が現ネットワークへ再収束させる (60s idle
+#       期限で前回フローも消える)。
+#     - A/B 比較は BENCH_RUNS>1 (例: BENCH_RUNS=4) で複数回実行し、median/IQR を
+#       報告する。1 回実行の数値は ±15-20% の実行間バラツキを持つ。
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-HELLO_CMD="latency|hetero|collapse3|latab|uneven|measure|multistream|profile|stagger|clean"
+HELLO_CMD="latency|hetero|collapse3|latab|uneven|measure|multistream|profile|stagger|wlbstate|clean"
 [ $# -ge 1 ] || { echo "usage: $0 <$HELLO_CMD> [...]"; exit 1; }
 CMD="$1"; shift || true
 
@@ -99,6 +119,8 @@ SAMP
 #!/usr/bin/env bash
 # per-core busy% sampler (max over window). /proc/stat の cpuN から
 # (total - idle - iowait) / total を 1s ごとに計算し、各コアの最大を出力。
+# 各秒ごと Running-max を吐く (cpusamp.sh と同様) — 計測窓終了前に
+# 読まれても意味がある。bench.sh の samp_cores は tail -1 で取得。
 declare -A mtotal mbusy maxp
 DUR="${1:-30}"
 i=0
@@ -122,11 +144,11 @@ while [ "$i" -lt "$DUR" ]; do
     fi
     mtotal[$idx]=$total; mbusy[$idx]=$busy
   done < /proc/stat
+  out=""
+  for c in "${!maxp[@]}"; do out="$out $c=${maxp[$c]}%"; done
+  echo "$out" | tr ' ' '\n' | sed '/^$/d' | sort -V | tr '\n' ' '
+  echo
 done
-out=""
-for c in "${!maxp[@]}"; do out="$out $c=${maxp[$c]}%"; done
-echo "$out" | tr ' ' '\n' | sed '/^$/d' | sort -V | tr '\n' ' '
-echo
 CORESAMP
 )
   printf '%s\n' "$coresamp" | ssh_srv 'cat > /tmp/cpucore.sh && chmod +x /tmp/cpucore.sh' >/dev/null 2>&1 || true
@@ -321,12 +343,114 @@ rx_bytes() { # $1=iface
   ssh_rtr "ip -s link show $1 2>/dev/null | awk '/RX:/{getline;print \$1}'" 2>/dev/null | grep -E '^[0-9]+$' | tail -1
 }
 
+# -----------------------------------------------------------------------------
+# WLB 推定器収束の観測 (wlbstate プロクシ + 適応的ウォームアップ用)
+#   xquic の |wlb|round_start|est_bw は現ビルドで mqvpn ログに出ないため、
+#   STATUS の per-path 実測レート (tx+rx 差分) を proxy に使う。
+#   STATUS 周期は 5-30s 不規則なので、snap が進むまで 5s ずつ待つ。
+wlb_snap() { # 直近 STATUS の path 行を "ts id path tx rx" に正規化 (mqvpn-0 固定)
+  ssh_rtr 'sudo journalctl -n 400 --no-pager -u mqvpn-0.service 2>/dev/null | grep -E "path[0-9]=eth" | tail -3 | sed -E "s/^[A-Za-z]{3} [0-9]+ ([0-9:]+) .*path([0-9])=([a-z0-9]+) srtt=[^ ]* tx=([0-9]+) rx=([0-9]+).*/\1 \2 \3 \4 \5/"' 2>/dev/null | grep -vE '^fetching|Warning:'
+}
+
+# 2 つの "id rate" 列が全 path で pct% 以内に収まっていれば 0(安定) を返す
+rates_stable() {
+  local p="$1" c="$2" pct="$3"
+  [ -n "$p" ] && [ -n "$c" ] || return 1
+  awk -v pct="$pct" '
+    NR==FNR{p[$1]=$2;next}
+    ($1 in p){m++; base=p[$1]; if(base==0)base=$2; if(base==0)next; d=$2-base; if(d<0)d=-d; if(d*100/base>pct){exit 1}}
+    END{if(m==0)exit 1}
+  ' <(printf '%s\n' "$p") <(printf '%s\n' "$c") >/dev/null
+}
+
+# 2 つの raw snap (ts id path tx rx) から per-path レート(Mbps) "id rate" を出力
+wlb_rates_of() { # $1=raw_snap_a $2=raw_snap_b
+  paste <(printf '%s\n' "$1") <(printf '%s\n' "$2") | awk '{split($1,t,":"); split($6,u,":"); dt=(u[1]*3600+u[2]*60+u[3])-(t[1]*3600+t[2]*60+t[3]); if(dt<=0)dt=5; rate=($9-$4)+($10-$5); printf "path%s %.0f\n", $2, rate*8/(dt*1000000)}'
+}
+
+# 推定器が収束するまで待ち、実ウォームアップ秒数を echo。
+# wlb_snap を 5s ごとに poll (ブロックしない) し、per-path 実測レートが
+# BENCH_STEADY_PCT(既定15)% 以内に 2 回連続安定なら抜ける。
+# 最小 min / 最大 max の間で挟む (STATUS が出なければ max で抜ける)。
+wait_wlb_steady() {
+  local min=${1:-60} max=${2:-120} pct=${BENCH_STEADY_PCT:-15}
+  local t0=$SECONDS prev_raw="" prev_rates="" cur_raw cur_rates stable=0 used=$max
+  while [ $(( SECONDS - t0 )) -lt "$max" ]; do
+    cur_raw=$(wlb_snap)
+    if [ -n "$prev_raw" ] && [ "$prev_raw" != "$cur_raw" ]; then
+      cur_rates=$(wlb_rates_of "$prev_raw" "$cur_raw")
+      if [ -n "$prev_rates" ] && rates_stable "$prev_rates" "$cur_rates" "$pct"; then
+        stable=$((stable+1))
+        if [ "$stable" -ge 2 ] && [ $(( SECONDS - t0 )) -ge "$min" ]; then used=$(( SECONDS - t0 )); break; fi
+      else stable=0; fi
+      prev_rates="$cur_rates"
+    fi
+    prev_raw="$cur_raw"
+    sleep 5
+  done
+  [ $(( SECONDS - t0 )) -lt "$min" ] && used=$min
+  echo "$used"
+}
+
+# 公平性指標: FAIR_JAIN (Jain) / FAIR_CPRMSE (容量比例 RMSE %) をセット
+#   $1=mbps(indexed) $2=ceil(indexed) $3=total
+compute_fairness() {
+  local -n _M=$1 _C=$2; local total=$3
+  local sum=0 sumsq=0 n=0 sceil=0 x i
+  for i in "${!_M[@]}"; do x=${_M[i]:-0}; sum=$((sum+x)); sumsq=$((sumsq+x*x)); n=$((n+1)); sceil=$((sceil+${_C[i]:-0})); done
+  FAIR_JAIN=0; [ "$sumsq" -gt 0 ] && FAIR_JAIN=$(awk "BEGIN{printf \"%.4f\",($sum*$sum)/($n*$sumsq)}")
+  FAIR_CPRMSE=null
+  if [ "$sceil" -gt 0 ]; then
+    local se=0 i
+    for i in "${!_M[@]}"; do local ideal=$(( total * ${_C[i]:-0} / sceil )); local e=$(( ${_M[i]:-0} - ideal )); [ "$e" -lt 0 ] && e=$(( -e )); se=$(( se + e*e )); done
+    FAIR_CPRMSE=$(awk "BEGIN{printf \"%.1f\",sqrt($se)/$total*100}")
+  fi
+}
+
+# BENCH_JSON=1 で $BENCH_JSON_FILE (既定 test/bench-results.jsonl) に 1 行追記。
+#   $1=cmd $2=label $3=warmup_used $4=total $5=mbps(indexed) $6=ceil(indexed) $7=paths(space)
+emit_bench_json() {
+  [ -n "${BENCH_JSON:-}" ] || return 0
+  local f="${BENCH_JSON_FILE:-$SCRIPT_DIR/bench-results.jsonl}"
+  local cmd="$1" label="$2" wu="$3" total="$4" mn="$5" cn="$6" paths="$7"
+  local -n M=$mn C=$cn
+  compute_fairness "$mn" "$cn" "$total"
+  local pj="" i=0 p util
+  for p in $paths; do
+    if [ "${C[i]:-0}" = 0 ]; then util=null; else util=$(( ${M[i]:-0} * 100 / ${C[i]:-0} )); fi
+    [ -n "$pj" ] && pj="$pj,"
+    pj="$pj{\"iface\":\"$p\",\"mbps\":${M[i]:-0},\"ceil\":${C[i]:-0},\"util\":$util}"
+    i=$((i+1))
+  done
+  printf '{"ts":"%s","cmd":"%s","label":"%s","warmup_used":%s,"total_mbps":%s,"fairness_jain":%s,"cap_prop_rmse_pct":%s,"paths":[%s]}\n' \
+    "$(date -u +%FT%TZ)" "$cmd" "$label" "$wu" "$total" "$FAIR_JAIN" "$FAIR_CPRMSE" "$pj" >> "$f"
+}
+
+# 計測の正しさ (chiken 議論の反映):
+#   WLB の推定器 (est_bw EWMA / 配信レートピーク) は収束に分単位かかるため、
+#   負荷開始直後からの窓平均は「推定器が整う前の過渡状態」を性能として出してしまう。
+#   そのため WARMUP 秒間は負荷のみ流し、per-path rx は WARMUP 後の定常窓
+#   [B0 → B1] の差分でのみ集計する。
+#   ウォームアップは既定で「適応的」: bench.sh wlbstate の推定器プロクシを用い、
+#   per-path 実測レートが BENCH_STEADY_PCT(既定15)% 以内に 2 回連続安定するまで待つ。
+#   最小 BENCH_WARMUP(既定60) / 最大 BENCH_WARMUP_MAX(既定 2x) で挟む。
+#   固定ウォームアップに戻す: BENCH_ADAPTIVE_WARMUP=0。
+#   収束の目視確認は bench.sh wlbstate。連続計測間のスケジューラ状態引き継ぎは
+#   WARMUP が現ネットワークへ吸収する。
+#   出力には公平性指標を付与: Jain 指数 (1=完全公平) と容量比例 RMSE%(ceil 既知時)。
+#   BENCH_JSON=1 で ./bench-results.jsonl に実測を 1 行/run 追記 (A/B 比較・時系列用)。
+#
 # do_measure [tcp|udp] [P] [rate_M] [down|up] [sec]
-#   iperf3 を流しつつ各 WAN の rx スループット・ceiling 比・利用率・TOTAL を表示。
+#   iperf3 を流しつつ各 WAN の rx スループット・ceiling 比・利用率・TOTAL・fairness を表示。
 #   ceiling は tc qdisc から動的取得するので uniform/hetero/collapse3 いずれでも正しく出る。
-do_measure() {
-  local proto="${1:-tcp}" P="${2:-20}" rate="${3:-1200}" dir="${4:-down}" sec="${5:-15}"
+#   BENCH_RUNS>1 なら複数回実行し median/IQR (バラツキをノイズとして可視化)。
+measure_once() {
+  local proto="$1" P="$2" rate="$3" dir="$4" sec="$5" warmup="$6"
   local flag="" uflag=""
+  local adaptive=0
+  [ "${BENCH_ADAPTIVE_WARMUP:-1}" != "0" ] && adaptive=1
+  local warmup_max="${BENCH_WARMUP_MAX:-$(( warmup * 2 ))}"
+  [ "$warmup_max" -lt "$warmup" ] && warmup_max=$(( warmup + 30 ))
   [ "$dir" = "down" ] && flag="-R"
   [ "$proto" = "udp" ] && uflag="-u"
   ensure_iperfd_mnet; ensure_rmem; ensure_wmem_mnet; ship_common
@@ -338,31 +462,64 @@ do_measure() {
     CEIL[$w]=${c:-0}
   done
 
-  # 負荷前の rx スナップショット
-  declare -A B0
-  for w in "${rtr_wan[@]}"; do B0[$w]=$(rx_bytes "$w"); done
-
-  samp_start "$((sec + 4))"
-  ssh_cli "iperf3 -c $TARGET -p $PORT ${uflag} ${flag} -P $P -b ${rate}M -t $sec > /tmp/mb.txt 2>&1" &
+  # 負荷は warmup_max まで流し、適応モードなら収束を待って実窓を決める
+  local wp=$(( warmup_max + sec + 5 ))
+  samp_start "$((wp + 4))"
+  ssh_cli "iperf3 -c $TARGET -p $PORT ${uflag} ${flag} -P $P -b ${rate}M -t $wp > /tmp/mb.txt 2>&1" &
   local IP=$!
-  sleep $((sec + 2))
-  wait "$IP" 2>/dev/null || true
 
-  echo "== $proto P=$P $dir @ ${sec}s (WAN: ${rtr_wan[*]}) =="
-  local tot=0 w mbps ceil util B1
+  local w_used="$warmup"
+  if [ "$adaptive" = 1 ]; then
+    w_used=$(wait_wlb_steady "$warmup" "$warmup_max")
+  else
+    sleep "$warmup"
+  fi
+
+  # 定常窓 [B0 -> B1] のみで集計
+  local -a B0=() i=0 w
+  for w in "${rtr_wan[@]}"; do B0[$i]=$(rx_bytes "$w"); i=$((i + 1)); done
+  sleep "$sec"
+  local -a B1=()
+  i=0
+  for w in "${rtr_wan[@]}"; do B1[$i]=$(rx_bytes "$w"); i=$((i + 1)); done
+  kill "$IP" 2>/dev/null; wait "$IP" 2>/dev/null || true
+
+  echo "== $proto P=$P $dir @ ${sec}s steady (after ${w_used}s warmup; WAN: ${rtr_wan[*]}) =="
+  local tot=0 mbps ceil util
+  local -a MBPS=() CEIL2=()
+  i=0
   for w in "${rtr_wan[@]}"; do
-    B1=$(rx_bytes "$w")
-    mbps=$(( (${B1:-0} - ${B0[$w]:-0}) * 8 / (sec * 1000000) ))
+    mbps=$(( (B1[i] - B0[i]) * 8 / (sec * 1000000) ))
     ceil=${CEIL[$w]}
     if [ "$ceil" = 0 ]; then util="NA"; else util=$(( mbps * 100 / ceil )); fi
     printf "  %-6s %8d Mbps  ceil %sM  util %s%%\n" "$w" "$mbps" "$ceil" "$util"
-    tot=$((tot + mbps))
+    tot=$((tot + mbps)); MBPS[i]=$mbps; CEIL2[i]=$ceil; i=$((i + 1))
   done
   echo "  TOTAL (tunnel-bound) = ${tot} Mbps"
-  echo "  client: $(ssh_cli "grep -E 'SUM|receiver' /tmp/mb.txt 2>/dev/null" 2>&1 | grep -vE 'fetching|Warning:' | tail -1)"
+  compute_fairness MBPS CEIL2 "$tot"
+  echo "  fairness (Jain) = $FAIR_JAIN  cap-prop RMSE = ${FAIR_CPRMSE}%"
+  emit_bench_json "measure" "$proto P=$P $dir @ ${sec}s steady (after ${w_used}s warmup)" "$w_used" "$tot" MBPS CEIL2 "${rtr_wan[*]}"
+  echo "  client: $(ssh_cli 'g=$(grep -E "\[SUM\] 0\.00-" /tmp/mb.txt 2>/dev/null | tail -1); [ -z "$g" ] && g=$(grep -E "\[SUM\]" /tmp/mb.txt 2>/dev/null | tail -1); echo "$g"' 2>&1 | grep -vE 'fetching|Warning:' | tail -1)"
   echo "  srvCPU: $(samp_max S)  rtrCPU: $(samp_max R)"
   echo "  srvCores: $(samp_cores S)"
   echo "  rtrCores: $(samp_cores R)"
+}
+
+do_measure() {
+  local proto="${1:-tcp}" P="${2:-20}" rate="${3:-1200}" dir="${4:-down}" sec="${5:-15}"
+  local warmup="${BENCH_WARMUP:-60}" runs="${BENCH_RUNS:-1}"
+  local out t
+  local -a totals=()
+  for _ in $(seq 1 "$runs"); do
+    out=$(measure_once "$proto" "$P" "$rate" "$dir" "$sec" "$warmup")
+    printf '%s\n' "$out"
+    t=$(printf '%s\n' "$out" | grep -o 'TOTAL (tunnel-bound) = [0-9]*' | grep -o '[0-9]*$')
+    [ -n "$t" ] && totals+=("$t")
+  done
+    if [ "$runs" -gt 1 ]; then
+    echo "== summary over ${#totals[@]} runs (Mbps, steady-state) =="
+    printf '%s\n' "${totals[@]}" | sort -n | awk '{a[NR]=$1} END{n=NR; if(n==0) exit; q1i=(int((n+1)/4)<1)?1:int((n+1)/4); q3i=(int(3*(n+1)/4)<1)?1:int(3*(n+1)/4); med=(n%2)?a[(n+1)/2]:((a[n/2]+a[n/2+1])/2); printf "  median=%d  IQR=[%d,%d]  min=%d max=%d\n", med, a[q1i], a[q3i], a[1], a[n]}'
+  fi
 }
 
 
@@ -376,6 +533,9 @@ do_measure() {
 #   複数コネクションを gap 秒ずつずらして同時開始し、到着が分散する際に
 #   WLB がピンを各パスへ振り分けるかを per-path で計測する。
 #   各コネクションは異ポート(5201..)なので別フロー(=別ピン)として扱われる。
+#   注記: この実験は「フロー開始タイミング(ウォームアップ盲目窓)の影響」そのものを
+#   測るためのもので、開始位相を含む窓平均が目的。do_measure のような warmup 分離は
+#   意図的に行わない (ピン決定はフロー開始瞬間に起き、開始位相の除外は測定対象の破壊)。
 do_stagger() {
   local N="${1:-20}" gap="${2:-1}" sec="${3:-15}" proto="${4:-tcp}" dir="${5:-down}"
   local flag="" uflag="" win=$(( gap * (N - 1) + sec ))
@@ -421,46 +581,70 @@ do_stagger() {
 #   以下を同時取得する:
 #     - トンネル RTT (負荷下): ping TARGET の p50/p95/p99
 #     - 小パケット UDP jitter: iperf3 -u -l 64 -b 10M (down)
+#   負荷は BENCH_WARMUP (既定 60) 秒間だけ先に流して定常化させ (--omit で除外)、
+#   ping/jitter と per-path rx はウォームアップ後の定常窓 [B0 → B1] でのみ計測する。
+#   計測対象の過渡状態混入を防ぐため (推定器の収束 ≫ 計測窓 問題への対処)。
 do_latab() {
   local sec="${1:-15}"
-  local label="${2:-latab}"
+  local label="${2:-latab}" warmup="${BENCH_WARMUP:-60}"
+  local adaptive=0
+  [ "${BENCH_ADAPTIVE_WARMUP:-1}" != "0" ] && adaptive=1
+  local warmup_max="${BENCH_WARMUP_MAX:-$(( warmup * 2 ))}"
+  [ "$warmup_max" -lt "$warmup" ] && warmup_max=$(( warmup + 30 ))
+  local wp=$(( warmup_max + sec + 5 ))
   ensure_iperfd_mnet; ensure_rmem; ensure_wmem_mnet; ship_common
   declare -A CEIL
   for w in "${rtr_wan[@]}"; do
     local c; c=$(ssh_rtr "tc qdisc show dev $w 2>/dev/null | grep -o 'rate [0-9]*Mbit' | grep -o '[0-9]*' || true" 2>/dev/null | tail -1)
     CEIL[$w]=${c:-0}
   done
-  declare -A B0
-  for w in "${rtr_wan[@]}"; do B0[$w]=$(rx_bytes "$w"); done
 
-  local fill_dur=40
-  samp_start "$((fill_dur + 4))"
-  ssh_cli "iperf3 -c $TARGET -p $PORT -R -P 20 -b 1200M -t $fill_dur > /tmp/fill.txt 2>&1" &
+  samp_start "$((wp + 4))"
+  ssh_cli "iperf3 -c $TARGET -p $PORT -R -P 20 -b 1200M -t $wp > /tmp/fill.txt 2>&1" &
   local FILL=$!
+
+  local w_used="$warmup"
+  if [ "$adaptive" = 1 ]; then
+    w_used=$(wait_wlb_steady "$warmup" "$warmup_max")
+  else
+    sleep "$warmup"
+  fi
+
+  # 定常窓 [B0 -> B1] のみで集計 (B1 は fill 終端で取る。jitter は別負荷なので混入させない)
+  local -a B0=()
+  local i=0 w
+  for w in "${rtr_wan[@]}"; do B0[$i]=$(rx_bytes "$w"); i=$((i + 1)); done
 
   # トンネル RTT (負荷下) p50/p95/p99 — 生サンプルを受け取りローカルで集計
   local pings
-  pings=$(ssh_cli "ping -c 100 -i 0.2 $TARGET 2>/dev/null | grep -o 'time=[0-9.]*' | sed 's/time=//'" 2>/dev/null)
+  pings=$(ssh_cli "ping -c $((sec * 5)) -i 0.2 $TARGET 2>/dev/null | grep -o 'time=[0-9.]*' | sed 's/time=//'" 2>/dev/null)
   local pingres
   pingres=$(echo "$pings" | sort -n | awk 'NF{a[NR]=$1; n=NR} END{ if(n==0){print "no samples"; exit} i95=int(n*0.95); i99=int(n*0.99); if(i95<1)i95=1; if(i99<1)i99=1; printf "p50=%.2f p95=%.2f p99=%.2f min=%.2f max=%.2f", a[int(n/2)], a[i95], a[i99], a[1], a[n] }')
 
-  # 小パケット UDP jitter (負荷下, down)
+  local -a B1=()
+  i=0
+  for w in "${rtr_wan[@]}"; do B1[$i]=$(rx_bytes "$w"); i=$((i + 1)); done
+  wait "$FILL" 2>/dev/null || true
+
+  # 小パケット UDP jitter (負荷窓外だが「負荷下」近似として取得)
   local jit
   jit=$(ssh_cli "iperf3 -c $TARGET -u -b 10M -l 64 -t 10 -R 2>/dev/null | grep -E 'receiver' | tail -1" 2>/dev/null)
 
-  wait "$FILL" 2>/dev/null || true
-
-  echo "== $label fill=${fill_dur}s =="
-  local tot=0 w mbps ceil util B1
+  echo "== $label (steady after ${w_used}s warmup; RTT window=${sec}s) =="
+  local tot=0 mbps ceil util
+  local -a MBPS=() CEIL2=()
+  i=0
   for w in "${rtr_wan[@]}"; do
-    B1=$(rx_bytes "$w")
-    mbps=$(( (${B1:-0} - ${B0[$w]:-0}) * 8 / (fill_dur * 1000000) ))
+    mbps=$(( (B1[i] - B0[i]) * 8 / (sec * 1000000) ))
     ceil=${CEIL[$w]}
     if [ "$ceil" = 0 ]; then util="NA"; else util=$(( mbps * 100 / ceil )); fi
     printf "  %-6s %8d Mbps  ceil %sM  util %s%%\n" "$w" "$mbps" "$ceil" "$util"
-    tot=$((tot + mbps))
+    tot=$((tot + mbps)); MBPS[i]=$mbps; CEIL2[i]=$ceil; i=$((i + 1))
   done
   echo "  TOTAL (tunnel-bound) = ${tot} Mbps"
+  compute_fairness MBPS CEIL2 "$tot"
+  echo "  fairness (Jain) = $FAIR_JAIN  cap-prop RMSE = ${FAIR_CPRMSE}%"
+  emit_bench_json "latab" "$label (steady after ${w_used}s warmup)" "$w_used" "$tot" MBPS CEIL2 "${rtr_wan[*]}"
   echo "  tunnel RTT (ping p50/p95/p99, load): ${pingres}"
   echo "  udp64 jitter (load): ${jit}"
   echo "  srvCPU: $(samp_max S)  rtrCPU: $(samp_max R)"
@@ -545,6 +729,28 @@ case "$CMD" in
   stagger)
     N="${1:-20}"; GAP="${2:-1}"; SEC="${3:-15}"; PROTO="${4:-tcp}"; DIR="${5:-down}"
     do_stagger "$N" "$GAP" "$SEC" "$PROTO" "$DIR"
+    ;;
+wlbstate)
+    # 推定器収束の目視確認: ルーター STATUS ログの per-path 実測レートを
+    # 2 点観測の差分 (tx+rx → Mbps) で表示。値が安定すればスケジューラの
+    # 分配が現ネットワークに収束したとみなして計測を開始する。
+    # 注記: xquic 内部の |wlb|round_start|est_bw ログは現ビルドでは mqvpn の
+    # ログ出力に流れないため、ここでは STATUS の実測レートを proxy に使う。
+    # STATUS の周期は 5-30s 程度で不規則なため、snap が進むまで 5s ずつ待つ。
+    s1=$(wlb_snap)
+    s2=""
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+      sleep 5
+      s2=$(wlb_snap)
+      [ -n "$s2" ] && [ "$s1" != "$s2" ] && break
+    done
+    echo "== WLB steady-state proxy (router STATUS per-path rate) =="
+    if [ -n "$s1" ] && [ -n "$s2" ] && [ "$s1" != "$s2" ]; then
+      # 観測間隔は 2 点の時刻差から算出 (STATUS 周期は不規則のため固定 5s で割らない)
+      paste <(printf '%s\n' "$s1") <(printf '%s\n' "$s2") | awk '{split($1,t,":"); split($6,u,":"); dt=(u[1]*3600+u[2]*60+u[3])-(t[1]*3600+t[2]*60+t[3]); if(dt<=0)dt=5; rate=($9-$4)+($10-$5); printf "  path%s %s: %.0f Mbps (dt=%ds)\n", $2, $3, rate*8/(dt*1000000), dt}'
+    else
+      echo "  (STATUS path 行を捕捉できず。ログが流れていないか、mqvpn が応答なし)"
+    fi
     ;;
   *)
     echo "unknown: $CMD (use: $CMDRUN)"; exit 1;
