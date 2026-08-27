@@ -86,6 +86,46 @@ SAMP
 )
   printf '%s\n' "$samp" | ssh_srv 'cat > /tmp/cpusamp.sh && chmod +x /tmp/cpusamp.sh' >/dev/null 2>&1 || true
   printf '%s\n' "$samp" | ssh_rtr 'cat > /tmp/cpusamp.sh && chmod +x /tmp/cpusamp.sh' >/dev/null 2>&1 || true
+
+  # 生コアごとの busy% サンプラ (ウィンドウ内最大)。Linux CFS が mqvpn インスタンス
+  # (各実質シングルスレッド) を別 vCPU に振り分けているかを可視化するため。
+  local coresamp
+  coresamp=$(cat << 'CORESAMP'
+#!/usr/bin/env bash
+# per-core busy% sampler (max over window). /proc/stat の cpuN から
+# (total - idle - iowait) / total を 1s ごとに計算し、各コアの最大を出力。
+declare -A mtotal mbusy maxp
+DUR="${1:-30}"
+i=0
+while [ "$i" -lt "$DUR" ]; do
+  sleep 1
+  i=$((i+1))
+  while read -r line; do
+    case "$line" in
+      cpu[0-9]*) ;;
+      *) continue ;;
+    esac
+    fields=($line)
+    idx="${fields[0]}"
+    total=$(( ${fields[1]} + ${fields[2]} + ${fields[3]} + ${fields[4]} + ${fields[5]} + ${fields[6]} + ${fields[7]} + ${fields[8]} ))
+    busy=$(( total - ${fields[4]} - ${fields[5]} ))
+    if [ -n "${mtotal[$idx]}" ]; then
+      dt=$(( total - ${mtotal[$idx]} )); [ "$dt" -le 0 ] && dt=1
+      db=$(( busy - ${mbusy[$idx]} ))
+      pct=$(( db * 100 / dt ))
+      if [ -z "${maxp[$idx]}" ] || [ "$pct" -gt "${maxp[$idx]}" ]; then maxp[$idx]=$pct; fi
+    fi
+    mtotal[$idx]=$total; mbusy[$idx]=$busy
+  done < /proc/stat
+done
+out=""
+for c in "${!maxp[@]}"; do out="$out $c=${maxp[$c]}%"; done
+echo "$out" | tr ' ' '\n' | sed '/^$/d' | sort -V | tr '\n' ' '
+echo
+CORESAMP
+)
+  printf '%s\n' "$coresamp" | ssh_srv 'cat > /tmp/cpucore.sh && chmod +x /tmp/cpucore.sh' >/dev/null 2>&1 || true
+  printf '%s\n' "$coresamp" | ssh_rtr 'cat > /tmp/cpucore.sh && chmod +x /tmp/cpucore.sh' >/dev/null 2>&1 || true
 }
 
 # --- netem ---
@@ -173,6 +213,8 @@ samp_start() {
   local dur="$1"
   ssh_srv "rm -f /tmp/cpuS.log; nohup /tmp/cpusamp.sh ${dur} > /tmp/cpuS.log 2>&1 & echo ok" >/dev/null 2>&1 || true
   ssh_rtr "rm -f /tmp/cpuR.log; nohup /tmp/cpusamp.sh ${dur} > /tmp/cpuR.log 2>&1 & echo ok" >/dev/null 2>&1 || true
+  ssh_srv "rm -f /tmp/cpuCoresS.log; nohup /tmp/cpucore.sh ${dur} > /tmp/cpuCoresS.log 2>&1 & echo ok" >/dev/null 2>&1 || true
+  ssh_rtr "rm -f /tmp/cpuCoresR.log; nohup /tmp/cpucore.sh ${dur} > /tmp/cpuCoresR.log 2>&1 & echo ok" >/dev/null 2>&1 || true
 }
 
 samp_max() { # $1=host S|R
@@ -181,6 +223,14 @@ samp_max() { # $1=host S|R
     ssh_srv 'grep -o "jiffies/s=[0-9]*" /tmp/cpuS.log | sort -t= -k2 -n | tail -1 | sed "s/jiffies\/s=//"' 2>/dev/null | tail -1
   else
     ssh_rtr 'grep -o "jiffies/s=[0-9]*" /tmp/cpuR.log | sort -t= -k2 -n | tail -1 | sed "s/jiffies\/s=//"' 2>/dev/null | tail -1 || echo "?"
+  fi
+}
+
+samp_cores() { # $1=host S|R  ->  "cpu0=47% cpu1=45% ..." (window max per core)
+  if [ "$1" = "S" ]; then
+    ssh_srv 'tail -1 /tmp/cpuCoresS.log' 2>/dev/null | tail -1
+  else
+    ssh_rtr 'tail -1 /tmp/cpuCoresR.log' 2>/dev/null | tail -1
   fi
 }
 
@@ -255,6 +305,8 @@ do_measure() {
   echo "  TOTAL (tunnel-bound) = ${tot} Mbps"
   echo "  client: $(ssh_cli "grep -E 'SUM|receiver' /tmp/mb.txt 2>/dev/null" 2>&1 | grep -vE 'fetching|Warning:' | tail -1)"
   echo "  srvCPU: $(samp_max S)  rtrCPU: $(samp_max R)"
+  echo "  srvCores: $(samp_cores S)"
+  echo "  rtrCores: $(samp_cores R)"
 }
 
 
@@ -304,6 +356,7 @@ do_stagger() {
   done
   echo "  TOTAL (tunnel-bound) = ${tot} Mbps"
   echo "  rtrCPU: $(samp_max R)"
+  echo "  rtrCores: $(samp_cores R)"
 }
 
 # --- クライアントの UDP 受信バッファ拡大 ---
