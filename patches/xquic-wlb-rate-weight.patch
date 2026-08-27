@@ -1,8 +1,7 @@
 diff --git a/third_party/xquic/src/transport/scheduler/xqc_scheduler_wlb.c b/third_party/xquic/src/transport/scheduler/xqc_scheduler_wlb.c
-index f40f2e8..a6817e6 100644
---- a/third_party/xquic/src/transport/scheduler/xqc_scheduler_wlb.c
-+++ b/third_party/xquic/src/transport/scheduler/xqc_scheduler_wlb.c
-@@ -106,6 +106,7 @@ typedef struct {
+--- a/third_party/xquic/src/transport/scheduler/xqc_scheduler_wlb.c	2026-08-27 12:54:53.154300138 +0900
++++ b/third_party/xquic/src/transport/scheduler/xqc_scheduler_wlb.c	2026-08-27 12:55:28.829465591 +0900
+@@ -106,6 +106,7 @@
      int                  force_refresh_paths; /* refresh WRR cache on recovery */
      uint64_t             recovery_unpin_until_us; /* temporarily disable TCP pinning after recovery */
      uint64_t             recovery_prefer_path_id; /* newly recovered path to prefer for first re-pin */
@@ -10,7 +9,7 @@ index f40f2e8..a6817e6 100644
      /* Set once a previously-healthy path has been observed as unhealthy. Gates
       * the "newly appeared path = recovery" heuristic so the heuristic does not
       * fire during initial multi-path setup (e.g. secondary path coming up
-@@ -195,6 +196,9 @@ wlb_flow_expire(xqc_wlb_scheduler_t *s, uint64_t now_us, xqc_connection_t *conn)
+@@ -195,6 +196,9 @@
      }
      s->last_expire_ts = now_us;
  
@@ -20,7 +19,7 @@ index f40f2e8..a6817e6 100644
      /*
       * Detect path recovery/addition (e.g. failover path comes back) without
       * mutating scheduler WRR state here.  Updating s->paths inside expire()
-@@ -353,8 +357,17 @@ wlb_flow_expire(xqc_wlb_scheduler_t *s, uint64_t now_us, xqc_connection_t *conn)
+@@ -353,8 +357,17 @@
          double loss = xqc_path_recent_loss_rate(path) / 100.0;
          if (loss >= WLB_LOSS_EVICT_THRESH) {
              e->hash = WLB_FLOW_TOMBSTONE;
@@ -38,7 +37,7 @@ index f40f2e8..a6817e6 100644
  }
  
  /* ---------- path helpers ---------- */
-@@ -559,8 +572,15 @@ wlb_compute_weight(xqc_path_ctx_t *path, uint64_t max_rtt_us)
+@@ -559,8 +572,15 @@
      double N = late_estimate_dgram(T_us, (double)srtt_us,
                                     cwnd_pkts, ssthresh, loss);
  
@@ -56,7 +55,7 @@ index f40f2e8..a6817e6 100644
      return weight > 0 ? weight : 1;
  }
  
-@@ -658,6 +678,7 @@ wlb_refresh_paths(xqc_wlb_scheduler_t *s, xqc_connection_t *conn)
+@@ -658,6 +678,7 @@
          }
          s->paths[n].path_id = path->path_id;
          s->paths[n].weight  = wlb_compute_weight(path, max_rtt_us);
@@ -64,7 +63,7 @@ index f40f2e8..a6817e6 100644
  
          /* Preserve deficit for existing paths */
          s->paths[n].deficit = 0;
-@@ -702,17 +723,47 @@ wlb_start_round(xqc_wlb_scheduler_t *s)
+@@ -702,17 +723,47 @@
      }
  
      uint64_t min_w = UINT64_MAX;
@@ -90,8 +89,7 @@ index f40f2e8..a6817e6 100644
 +        floor_w = 1;
 +    }
 +    uint64_t min_eff = UINT64_MAX;
-     for (int i = 0; i < s->n_paths; i++) {
--        int64_t quantum = (int64_t)(s->paths[i].weight / min_w);
++    for (int i = 0; i < s->n_paths; i++) {
 +        uint64_t eff = s->paths[i].weight;
 +        if (eff < floor_w) {
 +            eff = floor_w;
@@ -104,7 +102,8 @@ index f40f2e8..a6817e6 100644
 +        min_eff = 1;
 +    }
 +
-+    for (int i = 0; i < s->n_paths; i++) {
+     for (int i = 0; i < s->n_paths; i++) {
+-        int64_t quantum = (int64_t)(s->paths[i].weight / min_w);
 +        uint64_t eff = s->paths[i].weight;
 +        if (eff < floor_w) {
 +            eff = floor_w;
@@ -113,7 +112,7 @@ index f40f2e8..a6817e6 100644
          if (quantum < 1) {
              quantum = 1;
          }
-@@ -736,31 +787,34 @@ wlb_start_round(xqc_wlb_scheduler_t *s)
+@@ -736,31 +787,53 @@
  static uint64_t
  wlb_pick_pin_path(xqc_wlb_scheduler_t *s, xqc_connection_t *conn)
  {
@@ -141,6 +140,24 @@ index f40f2e8..a6817e6 100644
 -    int64_t best_deficit = INT64_MIN;
 +    int64_t best_c = INT64_MIN;
 +    int64_t total_w = 0;
++    uint64_t max_w = 0;
++    uint64_t eff[WLB_MAX_PATHS];
++    /* §2-G pin weight = estimated BANDWIDTH (capacity), not the RTT/loss
++     * compounded delivery-rate weight used for per-packet WRR.  The latter
++     * under-estimates high-RTT paths (more loss-rounds shrink cwnd estimate),
++     * so the old pin starved eth3 and left its physical line idle.  Pinning by
++     * true capacity fills every line proportionally (chiken §2-G addendum). */
++    for (int i = 0; i < s->n_paths; i++) {
++        xqc_path_ctx_t *path = wlb_find_path_ctx(conn, s->paths[i].path_id);
++        uint64_t w = (path != NULL) ? xqc_send_ctl_get_est_bw(path->path_send_ctl) : 0;
++        if (w == 0) {
++            w = (uint64_t)s->paths[i].weight;   /* pre-bw fallback */
++        }
++        eff[i] = w;
++        if (w > max_w) max_w = w;
++    }
++    uint64_t floor_w = max_w / 4;
++    if (floor_w < 1) floor_w = 1;
      for (int i = 0; i < s->n_paths; i++) {
          xqc_path_ctx_t *path = wlb_find_path_ctx(conn, s->paths[i].path_id);
          if (path == NULL) {
@@ -148,8 +165,9 @@ index f40f2e8..a6817e6 100644
          }
 -        if (s->paths[i].deficit > best_deficit) {
 -            best_deficit = s->paths[i].deficit;
-+        s->pin_credit[i] += (int64_t)s->paths[i].weight;
-+        total_w += (int64_t)s->paths[i].weight;
++        if (eff[i] < floor_w) eff[i] = floor_w;
++        s->pin_credit[i] += (int64_t)eff[i];
++        total_w += (int64_t)eff[i];
 +        if (s->pin_credit[i] > best_c) {
 +            best_c = s->pin_credit[i];
              best = i;
