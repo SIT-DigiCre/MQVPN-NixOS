@@ -26,6 +26,11 @@ set -euo pipefail
 #       A=30ms/458M, B=42ms+pareto/400M, C=35ms/450M を適用し、TCP 単一/多フロー
 #       での 1 パス固着(崩壊) と UDP での全パス分散を per-path で表示。
 #
+#   ./test/bench.sh latab [sec]
+#       容量は collapse3 と同一、RTT だけ広げた不均質 (eth1=10ms / eth3=200ms /
+#       eth4=50ms)。バルク埋め負荷下でトンネル RTT(p50/p95/p99) と小パケット UDP
+#       jitter を取得。pin ポリシー(純容量 vs RTTダンプ) の A/B 用シナリオ。
+#
 #   ./test/bench.sh measure [tcp|udp] [P] [rate] [dir] [sec]
 #       任意の netem 下で iperf3 を流し、各 WAN の rx スループット・ceiling 比・
 #       利用率・TOTAL・クライアント合計を表示 (collapse3 等で事前に netem を掛けて使う)。
@@ -42,7 +47,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-HELLO_CMD="latency|hetero|collapse3|measure|multistream|profile|stagger|clean"
+HELLO_CMD="latency|hetero|collapse3|latab|uneven|measure|multistream|profile|stagger|clean"
 [ $# -ge 1 ] || { echo "usage: $0 <$HELLO_CMD> [...]"; exit 1; }
 CMD="$1"; shift || true
 
@@ -167,6 +172,27 @@ apply_collapse3_host() {
   done; echo applied-host
 }
 
+# 容量は collapse3 と同一、RTT だけ広げる (eth1=10ms eth3=200ms eth4=50ms)。
+# 容量を固定し RTT のみ変化させることで、pin ポリシーの違い(純容量 vs RTTダンプ)
+# を孤立計測する (latab シナリオ用)。
+apply_latab_host() {
+  local specs=("delay 10ms rate 458mbit" "delay 200ms rate 400mbit" "delay 50ms rate 450mbit")
+  for i in "${!host_wan[@]}"; do
+    sudo -n tc qdisc replace dev "${host_wan[$i]}" root netem ${specs[$i]} limit 100000
+  done; echo applied-host
+}
+
+# 帯域不均一 + RTT 不均一 (本番の「回線ごとに容量が違う」ケース)。
+# 意図的に「RTT が大きい回線ほど太い」: eth1=200M/10ms, eth3=600M/200ms,
+# eth4=300M/50ms。RTTダンプ系ポリシーだと太い eth3 を捨てるため、
+# 容量ベースポリシーとの差が最も出る (uneven シナリオ用)。
+apply_uneven_host() {
+  local specs=("delay 10ms rate 200mbit" "delay 200ms rate 600mbit" "delay 50ms rate 300mbit")
+  for i in "${!host_wan[@]}"; do
+    sudo -n tc qdisc replace dev "${host_wan[$i]}" root netem ${specs[$i]} limit 100000
+  done; echo applied-host
+}
+
 apply_uniform() {
   local ms="$1"
   ssh_rtr "for i in ${rtr_wan[*]}; do
@@ -200,6 +226,36 @@ apply_collapse3() {
     "delay 30ms rate 458mbit"
     "delay 42ms 15ms distribution pareto rate 400mbit"
     "delay 35ms rate 450mbit"
+  )
+  local cmd="" i
+  for i in "${!rtr_wan[@]}"; do
+    cmd+="sudo -n tc qdisc replace dev ${rtr_wan[$i]} root netem ${specs[$i]} limit 100000;"
+  done
+  ssh_rtr "$cmd echo applied" 2>/dev/null
+}
+
+# latab: 容量同一・RTT のみ広げた不均質 (collapse3 の RTT 差を意図的に拡大)。
+# idx0 = eth1: 10ms/458M   idx1 = eth3: 200ms/400M   idx2 = eth4: 50ms/450M
+apply_latab() {
+  local specs=(
+    "delay 10ms rate 458mbit"
+    "delay 200ms rate 400mbit"
+    "delay 50ms rate 450mbit"
+  )
+  local cmd="" i
+  for i in "${!rtr_wan[@]}"; do
+    cmd+="sudo -n tc qdisc replace dev ${rtr_wan[$i]} root netem ${specs[$i]} limit 100000;"
+  done
+  ssh_rtr "$cmd echo applied" 2>/dev/null
+}
+
+# uneven: 帯域不均一 + RTT 不均一。遅い回線ほど太い:
+# idx0 = eth1: 10ms/200M   idx1 = eth3: 200ms/600M   idx2 = eth4: 50ms/300M
+apply_uneven() {
+  local specs=(
+    "delay 10ms rate 200mbit"
+    "delay 200ms rate 600mbit"
+    "delay 50ms rate 300mbit"
   )
   local cmd="" i
   for i in "${!rtr_wan[@]}"; do
@@ -273,12 +329,12 @@ do_measure() {
   local flag="" uflag=""
   [ "$dir" = "down" ] && flag="-R"
   [ "$proto" = "udp" ] && uflag="-u"
-  ensure_iperfd_mnet; ensure_rmem; ship_common
+  ensure_iperfd_mnet; ensure_rmem; ensure_wmem_mnet; ship_common
 
   # 各 WAN の netem ceiling (Mbit) を tc から動的取得
   declare -A CEIL
   for w in "${rtr_wan[@]}"; do
-    local c; c=$(ssh_rtr "tc qdisc show dev $w 2>/dev/null | grep -o 'rate [0-9]*Mbit' | grep -o '[0-9]*'" 2>/dev/null | tail -1)
+    local c; c=$(ssh_rtr "tc qdisc show dev $w 2>/dev/null | grep -o 'rate [0-9]*Mbit' | grep -o '[0-9]*' || true" 2>/dev/null | tail -1)
     CEIL[$w]=${c:-0}
   done
 
@@ -325,11 +381,11 @@ do_stagger() {
   local flag="" uflag="" win=$(( gap * (N - 1) + sec ))
   [ "$dir" = "down" ] && flag="-R"
   [ "$proto" = "udp" ] && uflag="-u"
-  ensure_iperfd_mnet; ensure_rmem; ship_common
+  ensure_iperfd_mnet; ensure_rmem; ensure_wmem_mnet; ship_common
 
   declare -A CEIL
   for w in "${rtr_wan[@]}"; do
-    local c; c=$(ssh_rtr "tc qdisc show dev $w 2>/dev/null | grep -o 'rate [0-9]*Mbit' | grep -o '[0-9]*'" 2>/dev/null | tail -1)
+    local c; c=$(ssh_rtr "tc qdisc show dev $w 2>/dev/null | grep -o 'rate [0-9]*Mbit' | grep -o '[0-9]*' || true" 2>/dev/null | tail -1)
     CEIL[$w]=${c:-0}
   done
   declare -A B0
@@ -359,6 +415,59 @@ do_stagger() {
   echo "  rtrCores: $(samp_cores R)"
 }
 
+# do_latab [sec] [label]
+#   wide-RTT シナリオでバルク埋め負荷下の実効遅延を計測する。pin ポリシー
+#   (純容量 vs RTTダンプ vs 容量ピークキャッシュ) の違いを浮き彫りにするため、
+#   以下を同時取得する:
+#     - トンネル RTT (負荷下): ping TARGET の p50/p95/p99
+#     - 小パケット UDP jitter: iperf3 -u -l 64 -b 10M (down)
+do_latab() {
+  local sec="${1:-15}"
+  local label="${2:-latab}"
+  ensure_iperfd_mnet; ensure_rmem; ensure_wmem_mnet; ship_common
+  declare -A CEIL
+  for w in "${rtr_wan[@]}"; do
+    local c; c=$(ssh_rtr "tc qdisc show dev $w 2>/dev/null | grep -o 'rate [0-9]*Mbit' | grep -o '[0-9]*' || true" 2>/dev/null | tail -1)
+    CEIL[$w]=${c:-0}
+  done
+  declare -A B0
+  for w in "${rtr_wan[@]}"; do B0[$w]=$(rx_bytes "$w"); done
+
+  local fill_dur=40
+  samp_start "$((fill_dur + 4))"
+  ssh_cli "iperf3 -c $TARGET -p $PORT -R -P 20 -b 1200M -t $fill_dur > /tmp/fill.txt 2>&1" &
+  local FILL=$!
+
+  # トンネル RTT (負荷下) p50/p95/p99 — 生サンプルを受け取りローカルで集計
+  local pings
+  pings=$(ssh_cli "ping -c 100 -i 0.2 $TARGET 2>/dev/null | grep -o 'time=[0-9.]*' | sed 's/time=//'" 2>/dev/null)
+  local pingres
+  pingres=$(echo "$pings" | sort -n | awk 'NF{a[NR]=$1; n=NR} END{ if(n==0){print "no samples"; exit} i95=int(n*0.95); i99=int(n*0.99); if(i95<1)i95=1; if(i99<1)i99=1; printf "p50=%.2f p95=%.2f p99=%.2f min=%.2f max=%.2f", a[int(n/2)], a[i95], a[i99], a[1], a[n] }')
+
+  # 小パケット UDP jitter (負荷下, down)
+  local jit
+  jit=$(ssh_cli "iperf3 -c $TARGET -u -b 10M -l 64 -t 10 -R 2>/dev/null | grep -E 'receiver' | tail -1" 2>/dev/null)
+
+  wait "$FILL" 2>/dev/null || true
+
+  echo "== $label fill=${fill_dur}s =="
+  local tot=0 w mbps ceil util B1
+  for w in "${rtr_wan[@]}"; do
+    B1=$(rx_bytes "$w")
+    mbps=$(( (${B1:-0} - ${B0[$w]:-0}) * 8 / (fill_dur * 1000000) ))
+    ceil=${CEIL[$w]}
+    if [ "$ceil" = 0 ]; then util="NA"; else util=$(( mbps * 100 / ceil )); fi
+    printf "  %-6s %8d Mbps  ceil %sM  util %s%%\n" "$w" "$mbps" "$ceil" "$util"
+    tot=$((tot + mbps))
+  done
+  echo "  TOTAL (tunnel-bound) = ${tot} Mbps"
+  echo "  tunnel RTT (ping p50/p95/p99, load): ${pingres}"
+  echo "  udp64 jitter (load): ${jit}"
+  echo "  srvCPU: $(samp_max S)  rtrCPU: $(samp_max R)"
+  echo "  srvCores: $(samp_cores S)"
+  echo "  rtrCores: $(samp_cores R)"
+}
+
 # --- クライアントの UDP 受信バッファ拡大 ---
 # 高レート測定 (特に RTT≈0 のラボ) では受信側ソケット溢れがロスに見えるため、
 # rmem を 64MB に拡大する (chiken/mqvpn-loss-investigation.md 参照)
@@ -366,8 +475,16 @@ ensure_rmem() {
   ssh_cli 'sudo -n sysctl -w net.core.rmem_max=67108864 net.core.rmem_default=67108864 >/dev/null; echo rmem-ok' >/dev/null 2>&1 || true
 }
 
+# --- mnet (下りの iperf 送信側) の TCP 窓拡大 ---
+# 高 RTT パス (200ms→RTT 400ms) で内側 TCP が BDP に達するには wmem ≥ 20MB が
+# 必要。既定 4MB だと 80Mbps/フローで頭打ちになり、スケジューラの分配ではなく
+# 内側 TCP の窓が律速に見える (latab/uneven の eth3 低レートの正体)。
+ensure_wmem_mnet() {
+  "$SCRIPT_DIR/ssh-mnet.sh" 'sudo -n sysctl -w net.core.wmem_max=67108864 net.core.wmem_default=67108864 net.ipv4.tcp_wmem="4096 131072 67108864" net.core.rmem_max=67108864 net.ipv4.tcp_rmem="4096 131072 67108864" >/dev/null; echo wmem-ok' >/dev/null 2>&1 || true
+}
+
 # =============================================================================
-CMDRUN="latency|hetero|collapse3|measure|multistream|profile|stagger|clean"
+CMDRUN="latency|hetero|collapse3|latab|uneven|measure|multistream|profile|stagger|clean"
 
 case "$CMD" in
   clean)
@@ -392,18 +509,26 @@ case "$CMD" in
     do_measure tcp 20 1200 down 15
     do_measure udp 20 1500 down 15
     ;;
+  latab)
+    clear_netem; apply_latab; apply_latab_host; sleep 8
+    do_latab "${1:-15}" "latab (eth1=10ms/458M eth3=200ms/400M eth4=50ms/450M)"
+    ;;
+  uneven)
+    clear_netem; apply_uneven; apply_uneven_host; sleep 8
+    do_latab "${1:-15}" "uneven (eth1=10ms/200M eth3=200ms/600M eth4=50ms/300M)"
+    ;;
   measure)
     PROTO="${1:-tcp}"; P="${2:-20}"; RATE="${3:-1200}"; DIR="${4:-down}"; SEC="${5:-15}"
     do_measure "$PROTO" "$P" "$RATE" "$DIR" "$SEC"
     ;;
   multistream)
     N="${1:-10}"; SEC="${2:-20}"
-    ensure_iperfd_mnet; ensure_rmem; ship_common
+    ensure_iperfd_mnet; ensure_rmem; ensure_wmem_mnet; ship_common
     "$SCRIPT_DIR/repro-cpu-saturation.sh" "$N" "$SEC"
     ;;
   profile)
     MS="${1:-50}"; RATE="${2:-800}"; SEC="${3:-15}"; DIR="${4:-down}"
-    ensure_iperfd_mnet; ensure_rmem; ship_common; clear_netem; apply_uniform "$MS"; apply_uniform_host "$MS"
+    ensure_iperfd_mnet; ensure_rmem; ensure_wmem_mnet; ship_common; clear_netem; apply_uniform "$MS"; apply_uniform_host "$MS"
     sleep 8
     PERF=$(ssh_srv "command -v perf 2>/dev/null | tail -1")
     [ -n "$PERF" ] || { echo "perf not found on server"; exit 1; }

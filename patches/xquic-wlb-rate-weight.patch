@@ -1,7 +1,19 @@
 diff --git a/third_party/xquic/src/transport/scheduler/xqc_scheduler_wlb.c b/third_party/xquic/src/transport/scheduler/xqc_scheduler_wlb.c
---- a/third_party/xquic/src/transport/scheduler/xqc_scheduler_wlb.c	2026-08-27 12:54:53.154300138 +0900
-+++ b/third_party/xquic/src/transport/scheduler/xqc_scheduler_wlb.c	2026-08-27 12:55:28.829465591 +0900
-@@ -106,6 +106,7 @@
+index f40f2e8..b00e7e7 100644
+--- a/third_party/xquic/src/transport/scheduler/xqc_scheduler_wlb.c
++++ b/third_party/xquic/src/transport/scheduler/xqc_scheduler_wlb.c
+@@ -92,6 +92,10 @@ typedef struct {
+     uint64_t    path_id;
+     uint64_t    weight;     /* LATE estimated throughput (scaled ×1000) */
+     int64_t     deficit;    /* WRR deficit counter */
++    uint64_t    peak_rate;  /* §C: delivery-rate high-water mark (pin capacity weight) */
++    uint64_t    peak_ts;    /* §C: last peak update timestamp (usec) */
++    uint64_t    prev_delivered; /* §C: ctl_delivered at last rate sample */
++    uint64_t    prev_ts;    /* §C: timestamp of last rate sample (usec) */
+ } wlb_path_weight_t;
+ 
+ /** Top-level scheduler state, allocated by xquic via xqc_wlb_scheduler_size(). */
+@@ -106,6 +110,7 @@ typedef struct {
      int                  force_refresh_paths; /* refresh WRR cache on recovery */
      uint64_t             recovery_unpin_until_us; /* temporarily disable TCP pinning after recovery */
      uint64_t             recovery_prefer_path_id; /* newly recovered path to prefer for first re-pin */
@@ -9,35 +21,34 @@ diff --git a/third_party/xquic/src/transport/scheduler/xqc_scheduler_wlb.c b/thi
      /* Set once a previously-healthy path has been observed as unhealthy. Gates
       * the "newly appeared path = recovery" heuristic so the heuristic does not
       * fire during initial multi-path setup (e.g. secondary path coming up
-@@ -195,6 +196,9 @@
+@@ -195,6 +200,13 @@ wlb_flow_expire(xqc_wlb_scheduler_t *s, uint64_t now_us, xqc_connection_t *conn)
      }
      s->last_expire_ts = now_us;
  
-+    /* Rotating index for periodic rebalance (see loop below). */
-+    static uint32_t rebal_idx;
++    /* §C: re-arm the refresh each sweep.  When every flow is pinned the WRR
++     * round never ends, so wlb_refresh_paths (and with it the delivery-rate
++     * peak sampler/decay) would otherwise freeze.  The refresh itself runs
++     * lazily in wlb_get_path on the next unpinned packet; setting the flag
++     * here is cheap and keeps pin weights tracking the live network. */
++    s->force_refresh_paths = 1;
 +
      /*
       * Detect path recovery/addition (e.g. failover path comes back) without
       * mutating scheduler WRR state here.  Updating s->paths inside expire()
-@@ -353,8 +357,17 @@
+@@ -353,7 +365,12 @@ wlb_flow_expire(xqc_wlb_scheduler_t *s, uint64_t now_us, xqc_connection_t *conn)
          double loss = xqc_path_recent_loss_rate(path) / 100.0;
          if (loss >= WLB_LOSS_EVICT_THRESH) {
              e->hash = WLB_FLOW_TOMBSTONE;
 +            continue;
-+        }
-+
-+        /* Periodic rebalance: re-pin a rotating 1/8 slice of live flows each
-+         * sweep (≈1/s) so pins converge to the current rate-based weights
-+         * instead of sticking to the warmup winner. (§2-C) */
-+        if (((uint32_t)i % 8) == rebal_idx) {
-+            e->hash = WLB_FLOW_TOMBSTONE;
          }
++
++        /* §C: no periodic re-pin here.  Pins persist (idle/loss/recovery
++         * eviction only) so live flows keep their cwnd; pin-time weights
++         * follow the peak-cache capacity, which is what spreads flows. */
      }
-+    rebal_idx = (rebal_idx + 1) % 8;
  }
  
- /* ---------- path helpers ---------- */
-@@ -559,8 +572,15 @@
+@@ -559,8 +576,15 @@ wlb_compute_weight(xqc_path_ctx_t *path, uint64_t max_rtt_us)
      double N = late_estimate_dgram(T_us, (double)srtt_us,
                                     cwnd_pkts, ssthresh, loss);
  
@@ -55,15 +66,60 @@ diff --git a/third_party/xquic/src/transport/scheduler/xqc_scheduler_wlb.c b/thi
      return weight > 0 ? weight : 1;
  }
  
-@@ -658,6 +678,7 @@
+@@ -658,15 +682,51 @@ wlb_refresh_paths(xqc_wlb_scheduler_t *s, xqc_connection_t *conn)
          }
          s->paths[n].path_id = path->path_id;
          s->paths[n].weight  = wlb_compute_weight(path, max_rtt_us);
 +        s->pin_credit[n] = 0;  /* §2-G: reset per-round pin RR credit */
  
-         /* Preserve deficit for existing paths */
+-        /* Preserve deficit for existing paths */
++        /* Preserve deficit + capacity peak + rate-sampler state for existing paths */
          s->paths[n].deficit = 0;
-@@ -702,17 +723,47 @@
++        s->paths[n].peak_rate = 0;
++        s->paths[n].peak_ts = 0;
++        s->paths[n].prev_delivered = 0;
++        s->paths[n].prev_ts = 0;
+         for (int j = 0; j < old_n; j++) {
+             if (old[j].path_id == path->path_id) {
+                 s->paths[n].deficit = old[j].deficit;
++                s->paths[n].peak_rate = old[j].peak_rate;
++                s->paths[n].peak_ts = old[j].peak_ts;
++                s->paths[n].prev_delivered = old[j].prev_delivered;
++                s->paths[n].prev_ts = old[j].prev_ts;
+                 break;
+             }
+         }
++
++        /* §C: pin capacity weight = high-water mark of the path's MEASURED
++         * delivery rate (ctl_delivered deltas over ~1s windows).  BBR's own
++         * bandwidth estimate freezes when app-limited (stale low values),
++         * and ack-rate sampling is RTT-biased; 1s-window deltas are neither.
++         * Holding the peak with ~1/s slow decay (half-life ~3 min) breaks
++         * the underuse positive-feedback loop while still adapting to real
++         * capacity changes (e.g. Starlink weather). */
++        xqc_send_ctl_t *pctl = path->path_send_ctl;
++        uint64_t now_us = xqc_monotonic_timestamp();
++        uint64_t d = pctl->ctl_delivered;
++        uint64_t rate = 0;
++        if (now_us - s->paths[n].prev_ts >= 1000000) {
++            if (s->paths[n].prev_delivered > 0 && d > s->paths[n].prev_delivered) {
++                rate = (d - s->paths[n].prev_delivered) * 1000000
++                       / (now_us - s->paths[n].prev_ts);
++            }
++            s->paths[n].prev_delivered = d;
++            s->paths[n].prev_ts = now_us;
++            if (rate > s->paths[n].peak_rate) {
++                s->paths[n].peak_rate = rate;
++                s->paths[n].peak_ts = now_us;
++            } else if (s->paths[n].peak_rate > 0) {
++                s->paths[n].peak_rate = s->paths[n].peak_rate * 255 / 256;
++                s->paths[n].peak_ts = now_us;
++            }
++        }
+         n++;
+     }
+     s->n_paths = n;
+@@ -702,17 +762,47 @@ wlb_start_round(xqc_wlb_scheduler_t *s)
      }
  
      uint64_t min_w = UINT64_MAX;
@@ -112,7 +168,49 @@ diff --git a/third_party/xquic/src/transport/scheduler/xqc_scheduler_wlb.c b/thi
          if (quantum < 1) {
              quantum = 1;
          }
-@@ -736,31 +787,53 @@
+@@ -733,34 +823,79 @@ wlb_start_round(xqc_wlb_scheduler_t *s)
+  * Does not decrement deficit: wrr_select still consumes a quantum for the
+  * packet that's about to be sent; the pin assignment is metadata only.
+  */
++/**
++ * §C: per-path pin efficiency — proven capacity (est_bw high-water mark from
++ * wlb_refresh_paths).  Used by wlb_pick_pin_path.  Returns max eff.
++ */
++static uint64_t
++wlb_pin_effs(xqc_wlb_scheduler_t *s, xqc_connection_t *conn,
++             uint64_t eff[WLB_MAX_PATHS])
++{
++    uint64_t max_peak = 0, max_eff = 0;
++    int i;
++
++    for (i = 0; i < s->n_paths; i++) {
++        if (s->paths[i].peak_rate > max_peak) {
++            max_peak = s->paths[i].peak_rate;
++        }
++    }
++
++    for (i = 0; i < s->n_paths; i++) {
++        /* §C: eff = measured delivery-rate peak, floored at half the best
++         * path's peak.  Pure measured-peak weighting has a self-fulfilling
++         * fixed point: under-provisioned paths measure low rates → get few
++         * flows → keep measuring low.  The 1/2 floor guarantees every path
++         * a real flow share so it can prove (or disprove) its capacity;
++         * truly dead paths are frozen by mqvpn's path state machine and
++         * never reach this loop. */
++        uint64_t e = s->paths[i].peak_rate;
++        if (max_peak == 0) {
++            e = 1;                          /* nothing proven yet: uniform */
++        } else if (e < max_peak / 2) {
++            e = max_peak / 2;
++        }
++        eff[i] = e;
++        if (e > max_eff) {
++            max_eff = e;
++        }
++    }
++    return max_eff;
++}
++
  static uint64_t
  wlb_pick_pin_path(xqc_wlb_scheduler_t *s, xqc_connection_t *conn)
  {
@@ -128,44 +226,31 @@ diff --git a/third_party/xquic/src/transport/scheduler/xqc_scheduler_wlb.c b/thi
 -     * wide path stays max-deficit through several decrements before
 -     * narrow gets its turn, giving weighted alternation.
 -     */
-+    /* §2-G: capacity-proportional round-robin PIN assignment.
-+     * The packet-driven WRR deficit (wlb_wrr_select) rotates per *packet*,
-+     * which lags bursty flow arrivals (e.g. speedtest opens all streams at
-+     * once), so a burst clumps on the warm primary (chiken/.../§1-(5)).
-+     * Rotating the PIN target per *flow* via a shared credit counter spreads
-+     * flows across paths proportional to their LATE weight even on a
-+     * simultaneous burst. O(n_paths), runs only at pin time (not per packet),
-+     * so it adds no per-packet overhead. */
++    /* §C: capacity-peak RR pin.  Weighting pins by PROVEN capacity (est_bw
++     * high-water mark) instead of instantaneous throughput cuts the positive
++     * feedback loop (starved path → low est_bw → lower pin weight → more
++     * starvation) that collapsed the high-RTT line in latab/uneven.  The
++     * clamped RTT preference keeps latency-sensitive flows off the slowest
++     * line without starving its capacity. */
++    uint64_t eff[WLB_MAX_PATHS];
++    uint64_t max_eff = wlb_pin_effs(s, conn, eff);
++    uint64_t floor_w = max_eff / 8;
++    if (floor_w < 1) {
++        floor_w = 1;
++    }
      int best = -1;
 -    int64_t best_deficit = INT64_MIN;
 +    int64_t best_c = INT64_MIN;
 +    int64_t total_w = 0;
-+    uint64_t max_w = 0;
-+    uint64_t eff[WLB_MAX_PATHS];
-+    /* §2-G pin weight = estimated BANDWIDTH (capacity), not the RTT/loss
-+     * compounded delivery-rate weight used for per-packet WRR.  The latter
-+     * under-estimates high-RTT paths (more loss-rounds shrink cwnd estimate),
-+     * so the old pin starved eth3 and left its physical line idle.  Pinning by
-+     * true capacity fills every line proportionally (chiken §2-G addendum). */
-+    for (int i = 0; i < s->n_paths; i++) {
-+        xqc_path_ctx_t *path = wlb_find_path_ctx(conn, s->paths[i].path_id);
-+        uint64_t w = (path != NULL) ? xqc_send_ctl_get_est_bw(path->path_send_ctl) : 0;
-+        if (w == 0) {
-+            w = (uint64_t)s->paths[i].weight;   /* pre-bw fallback */
-+        }
-+        eff[i] = w;
-+        if (w > max_w) max_w = w;
-+    }
-+    uint64_t floor_w = max_w / 4;
-+    if (floor_w < 1) floor_w = 1;
      for (int i = 0; i < s->n_paths; i++) {
-         xqc_path_ctx_t *path = wlb_find_path_ctx(conn, s->paths[i].path_id);
-         if (path == NULL) {
-             continue;
+-        xqc_path_ctx_t *path = wlb_find_path_ctx(conn, s->paths[i].path_id);
+-        if (path == NULL) {
+-            continue;
++        if (eff[i] < floor_w) {
++            eff[i] = floor_w;
          }
 -        if (s->paths[i].deficit > best_deficit) {
 -            best_deficit = s->paths[i].deficit;
-+        if (eff[i] < floor_w) eff[i] = floor_w;
 +        s->pin_credit[i] += (int64_t)eff[i];
 +        total_w += (int64_t)eff[i];
 +        if (s->pin_credit[i] > best_c) {
