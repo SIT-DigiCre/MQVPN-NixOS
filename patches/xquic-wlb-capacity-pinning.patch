@@ -1,0 +1,424 @@
+diff --git a/third_party/xquic/src/transport/scheduler/xqc_scheduler_wlb.c b/third_party/xquic/src/transport/scheduler/xqc_scheduler_wlb.c
+index f40f2e8..63ceb65 100644
+--- a/third_party/xquic/src/transport/scheduler/xqc_scheduler_wlb.c
++++ b/third_party/xquic/src/transport/scheduler/xqc_scheduler_wlb.c
+@@ -55,7 +55,7 @@
+  * Embedded arrays in xqc_wlb_scheduler_t grow to ~8KB total — fine for the
+  * heap-allocated scheduler struct, no longer relevant for stack frames. */
+ #define WLB_MAX_PATHS         XQC_PATH_HARD_CAP
+-#define LATE_MSS              1200    /* typical QUIC datagram payload bytes */
++#define WLB_EXPLORE_EVERY     8       /* every Nth pin → least-recently-pinned path (exploration/anti-starvation) */
+ 
+ /* Flow table — open-addressing hash table for flow-to-path pinning */
+ #define WLB_FLOW_TABLE_SIZE   4096
+@@ -90,8 +90,14 @@ typedef struct {
+ /** Per-path WRR state. */
+ typedef struct {
+     uint64_t    path_id;
+-    uint64_t    weight;     /* LATE estimated throughput (scaled ×1000) */
+-    int64_t     deficit;    /* WRR deficit counter */
++    uint64_t    weight;     /* capacity estimate (est_bw EWMA, bytes/sec) */
++    int64_t     deficit;    /* per-packet WRR deficit counter */
++    int64_t     pin_credit; /* per-flow pin WDRR credit (capacity-proportional flow allocation) */
++    uint64_t    est_bw;     /* capacity estimate: EWMA of measured delivery rate (bytes/sec, RTT-independent) */
++    uint64_t    prev_delivered; /* ctl_delivered at last rate sample */
++    uint64_t    prev_ts;    /* timestamp of last rate sample (usec) */
++    uint64_t    last_pin_us; /* last time this path received a flow pin (exploration age) */
++    uint64_t    pin_count;  /* cumulative pins on this path (observability) */
+ } wlb_path_weight_t;
+ 
+ /** Top-level scheduler state, allocated by xquic via xqc_wlb_scheduler_size(). */
+@@ -106,6 +112,7 @@ typedef struct {
+     int                  force_refresh_paths; /* refresh WRR cache on recovery */
+     uint64_t             recovery_unpin_until_us; /* temporarily disable TCP pinning after recovery */
+     uint64_t             recovery_prefer_path_id; /* newly recovered path to prefer for first re-pin */
++    uint64_t             pin_seq;    /* monotonically increasing pin counter for exploration slots */
+     /* Set once a previously-healthy path has been observed as unhealthy. Gates
+      * the "newly appeared path = recovery" heuristic so the heuristic does not
+      * fire during initial multi-path setup (e.g. secondary path coming up
+@@ -398,170 +405,35 @@ wlb_find_path_ctx(xqc_connection_t *conn, uint64_t path_id)
+  *      w_next     = p_no_loss * grow(w) + (1 - p_no_loss) * max(w/2, 1)
+  * ================================================================ */
+ 
+-/**
+- * Compute base^n via binary exponentiation (no libm dependency).
+- */
+-static double
+-late_ipow(double base, int n)
+-{
+-    if (n <= 0) {
+-        return 1.0;
+-    }
+-    double result = 1.0;
+-    double b = base;
+-    int e = n;
+-    while (e > 0) {
+-        if (e & 1) {
+-            result *= b;
+-        }
+-        b *= b;
+-        e >>= 1;
+-    }
+-    return result;
+-}
++/* LATE/cwnd model removed: it produced a weight ∝ cwnd ∝ BDP ∝ RTT and
++ * starved high-RTT paths.  Capacity estimation is now RTT-independent —
++ * see wlb_sample_rate() below. */
+ 
+ /**
+- * Iterative LATE estimate for QUIC Datagrams, aligned with BBR2+ behavior.
+- *
+- * Returns expected number of packets delivered within time budget T.
+- * Models per-round binomial loss with expected-value cwnd transitions
+- * (no FR/RTO since datagrams are unreliable).
+- *
+- * BBR2+ alignment (xqc_bbr2.c):
+- *   - loss_thresh = 0.02: loss below 2% is tolerated (no cwnd reduction)
+- *   - beta = 0.3: cwnd shrinks to 70% on loss (not 50% like Reno)
+- *   - fast_convergence: lower bounds reset every 5-9 RTTs, so we cap
+- *     the number of loss-reduction rounds to avoid compounding beyond
+- *     what BBR2+ actually sustains
++ * Sample a path's delivery RATE (bytes/sec), RTT-independent.
+  *
+- * @param T_us      time budget (microseconds)
+- * @param rtt_us    path RTT (microseconds)
+- * @param cwnd      congestion window (packets)
+- * @param ssthresh  slow-start threshold (packets)
+- * @param loss      per-packet loss probability [0, 1]
+- */
+-static double
+-late_estimate_dgram(double T_us, double rtt_us,
+-                    int cwnd, int ssthresh, double loss)
+-{
+-    if (T_us <= 0.0 || cwnd <= 0 || rtt_us <= 0.0) {
+-        return 0.0;
+-    }
+-    if (loss < 0.0) loss = 0.0;
+-    if (loss > 1.0) loss = 1.0;
+-
+-    /* BBR2 tolerates up to 2% random loss without reducing (xqc_bbr2_loss_thresh) */
+-    if (loss < 0.02) {
+-        loss = 0.0;
+-    }
+-
+-    /* T < RTT/2 — nothing delivered */
+-    if (T_us < rtt_us / 2.0) {
+-        return 0.0;
+-    }
+-
+-    double N = 0.0;
+-    double w = (double)cwnd;
+-    double sst = (double)ssthresh;
+-    double remaining = T_us;
+-    int rounds = 0;
+-
+-    /*
+-     * BBR2+ fast_convergence resets bw_lo/inflight_lo every 5-9 RTTs
+-     * (xqc_bbr2_fast_convergence_probe_round_base=4, rand=4).
+-     * Cap loss-reduction rounds to 7 (midpoint) to prevent unrealistic
+-     * compounding beyond a single probe cycle.
+-     */
+-    const int max_loss_rounds = 7;
+-
+-    while (remaining >= rtt_us / 2.0 && w >= 0.5) {
+-        /* Packets delivered this round: E[successes] = w·(1-l) */
+-        N += w * (1.0 - loss);
+-
+-        /* Probability of zero loss this round */
+-        double p_no_loss = late_ipow(1.0 - loss, (int)(w + 0.5));
+-        double p_loss = 1.0 - p_no_loss;
+-
+-        /* cwnd growth (no loss): SS doubles, CA increments */
+-        double w_grow;
+-        if (w < sst) {
+-            w_grow = 2.0 * w;
+-            if (w_grow > sst) w_grow = sst;
+-        } else {
+-            w_grow = w + 1.0;
+-        }
+-
+-        /*
+-         * cwnd shrink (loss): BBR2 beta=0.3 → retain 70%
+-         * (xqc_bbr2_inflight_lo_beta = 0.3, applied as 1-beta = 0.7)
+-         *
+-         * After max_loss_rounds, stop compounding shrink — BBR2+ would
+-         * have reset lower bounds and re-probed by then.
+-         */
+-        double w_shrink;
+-        if (rounds < max_loss_rounds) {
+-            w_shrink = w * 0.7;
+-        } else {
+-            w_shrink = w;  /* no further reduction after reset cycle */
+-        }
+-        if (w_shrink < 1.0) w_shrink = 1.0;
+-
+-        /* Expected-value cwnd for next round */
+-        double w_next = p_no_loss * w_grow + p_loss * w_shrink;
+-        double sst_next = p_no_loss * sst + p_loss * w_shrink;
+-
+-        w = w_next;
+-        sst = sst_next;
+-        remaining -= rtt_us;
+-        rounds++;
+-    }
+-
+-    return N;
+-}
+-
+-/**
+- * Compute LATE weight for a path.
+- *
+- * @param path         the path to evaluate
+- * @param max_rtt_us   maximum SRTT across all active paths (microseconds)
+- * @return weight proportional to estimated throughput (scaled ×1000)
++ * Uses ctl_delivered deltas over wall-clock time (NOT cwnd/BDP), so the
++ * resulting weight does not scale with RTT.  This is the fix for the
++ * high-RTT starvation that the LATE/cwnd weight inflicted.  Updates
++ * pw->prev_delivered / pw->prev_ts in place.
+  */
+ static uint64_t
+-wlb_compute_weight(xqc_path_ctx_t *path, uint64_t max_rtt_us)
++wlb_sample_rate(xqc_path_ctx_t *path, wlb_path_weight_t *pw)
+ {
+     xqc_send_ctl_t *ctl = path->path_send_ctl;
+-
+-    uint64_t srtt_us = xqc_send_ctl_get_srtt(ctl);
+-    if (srtt_us == 0) {
+-        return 1;
++    if (ctl == NULL) {
++        return 0;
+     }
+-
+-    /* cwnd in packets */
+-    uint64_t cwnd_bytes = ctl->ctl_cong_callback->xqc_cong_ctl_get_cwnd(ctl->ctl_cong);
+-    int cwnd_pkts = (int)(cwnd_bytes / LATE_MSS);
+-    if (cwnd_pkts < 1) cwnd_pkts = 1;
+-
+-    /* ssthresh: BBR2 has no traditional ssthresh.
+-     * Use 2×cwnd so LATE's SS phase models BBR2's probing headroom. */
+-    int ssthresh = cwnd_pkts * 2;
+-
+-    /* Loss probability [0, 1] */
+-    double loss = xqc_path_recent_loss_rate(path) / 100.0;
+-    if (loss < 0.0) loss = 0.0;
+-    if (loss > 1.0) loss = 1.0;
+-
+-    /* Time budget: max_rtt / 2 (LATE scheduling window) */
+-    double T_us = (double)max_rtt_us / 2.0;
+-    if (T_us < (double)srtt_us) {
+-        T_us = (double)srtt_us;     /* ensure at least 1 RTT of budget */
++    uint64_t d = ctl->ctl_delivered;
++    uint64_t now_us = xqc_monotonic_timestamp();
++    uint64_t rate = 0;
++    if (pw->prev_ts != 0 && now_us > pw->prev_ts && d > pw->prev_delivered) {
++        uint64_t dt = now_us - pw->prev_ts;
++        rate = (d - pw->prev_delivered) * 1000000 / dt;  /* bytes/sec */
+     }
+-
+-    double N = late_estimate_dgram(T_us, (double)srtt_us,
+-                                   cwnd_pkts, ssthresh, loss);
+-
+-    /* Scale ×1000 to preserve precision in integer weight */
+-    uint64_t weight = (uint64_t)(N * 1000.0);
+-    return weight > 0 ? weight : 1;
++    pw->prev_delivered = d;
++    pw->prev_ts = now_us;
++    return rate;
+ }
+ 
+ /* ================================================================
+@@ -624,26 +496,7 @@ wlb_refresh_paths(xqc_wlb_scheduler_t *s, xqc_connection_t *conn)
+         }
+     }
+ 
+-    /* First pass: find max SRTT across active, healthy paths */
+-    uint64_t max_rtt_us = 0;
+-    xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
+-        path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
+-        if (path->path_state != XQC_PATH_STATE_ACTIVE
+-            || path->app_path_status == XQC_APP_PATH_STATUS_FROZEN
+-            || (path->path_flag & XQC_PATH_FLAG_SOCKET_ERROR))
+-        {
+-            continue;
+-        }
+-        uint64_t srtt = xqc_send_ctl_get_srtt(path->path_send_ctl);
+-        if (srtt > max_rtt_us) {
+-            max_rtt_us = srtt;
+-        }
+-    }
+-    if (max_rtt_us == 0) {
+-        max_rtt_us = 50000;  /* 50ms default */
+-    }
+-
+-    /* Second pass: compute LATE weights and build path list */
++    /* Build path list with RTT-independent capacity estimates */
+     int n = 0;
+     xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
+         path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
+@@ -657,16 +510,42 @@ wlb_refresh_paths(xqc_wlb_scheduler_t *s, xqc_connection_t *conn)
+             break;
+         }
+         s->paths[n].path_id = path->path_id;
+-        s->paths[n].weight  = wlb_compute_weight(path, max_rtt_us);
+ 
+-        /* Preserve deficit for existing paths */
++        /* Restore persisted per-path state (deficit, capacity est, pin bookkeeping) */
+         s->paths[n].deficit = 0;
++        s->paths[n].pin_credit = 0;
++        s->paths[n].est_bw = 0;
++        s->paths[n].prev_delivered = 0;
++        s->paths[n].prev_ts = 0;
++        s->paths[n].last_pin_us = 0;
++        s->paths[n].pin_count = 0;
+         for (int j = 0; j < old_n; j++) {
+             if (old[j].path_id == path->path_id) {
+-                s->paths[n].deficit = old[j].deficit;
++                s->paths[n].deficit         = old[j].deficit;
++                s->paths[n].pin_credit      = old[j].pin_credit;
++                s->paths[n].est_bw          = old[j].est_bw;
++                s->paths[n].prev_delivered  = old[j].prev_delivered;
++                s->paths[n].prev_ts         = old[j].prev_ts;
++                s->paths[n].last_pin_us     = old[j].last_pin_us;
++                s->paths[n].pin_count       = old[j].pin_count;
+                 break;
+             }
+         }
++
++        /* Capacity estimation: delivery-rate (bytes/sec, RTT-independent) EWMA.
++         * Replaces the LATE/cwnd weight (∝ BDP ∝ RTT) that starved high-RTT
++         * paths.  Unproven paths (no sample yet) keep weight=1 and are pulled
++         * in by the exploration slot in wlb_pick_pin_path. */
++        uint64_t rate = wlb_sample_rate(path, &s->paths[n]);
++        if (rate > 0) {
++            if (s->paths[n].est_bw == 0) {
++                s->paths[n].est_bw = rate;
++            } else {
++                s->paths[n].est_bw = (s->paths[n].est_bw * 15 + rate) / 16;
++            }
++        }
++        s->paths[n].weight = s->paths[n].est_bw ? s->paths[n].est_bw : 1;
++
+         n++;
+     }
+     s->n_paths = n;
+@@ -721,46 +600,71 @@ wlb_start_round(xqc_wlb_scheduler_t *s)
+ }
+ 
+ /**
+- * Choose a PIN TARGET for a fresh TCP flow based on raw deficit, IGNORING
+- * current cwnd state.
++ * Choose a PIN TARGET for a fresh TCP flow.
++ *
++ * Two concerns are deliberately SEPARATED (the previous design jammed them
++ * into one weight with a 50% floor that over-allocated slow paths):
+  *
+- * Pinning is a long-lived routing decision; the actual packet that triggers
+- * the pin is sent via wlb_wrr_select() which honours cwnd. Separating the two
+- * avoids the failure mode where the wide path is momentarily cwnd-blocked at
+- * pin time — wrr_select would otherwise skip it, return the narrow path, and
+- * freeze the TCP flow there for the next 60s of idle expiry.
++ *   1. Capacity-proportional flow allocation (WDRR by est_bw): most pins go
++ *      to paths in proportion to their measured capacity, which fills every
++ *      path to its limit — the max-throughput objective (A).
+  *
+- * Does not decrement deficit: wrr_select still consumes a quantum for the
+- * packet that's about to be sent; the pin assignment is metadata only.
++ *   2. Exploration / anti-starvation: every WLB_EXPLORE_EVERY-th pin is given
++ *      to the LEAST-RECENTLY-PINNED path, regardless of capacity. This (a)
++ *      keeps starved paths alive and re-measures their true rate, and (b)
++ *      never over-allocates a genuinely slow path the way a relative floor did.
++ *
++ * Pinning is a long-lived routing decision; the actual packet is sent via
++ * wlb_wrr_select() which honours cwnd. Does not decrement the per-packet
++ * deficit (the pin is metadata only).
+  */
+ static uint64_t
+ wlb_pick_pin_path(xqc_wlb_scheduler_t *s, xqc_connection_t *conn)
+ {
+-    /* Pick the path with the highest deficit (≈ highest LATE weight) for
+-     * pin assignment, even if it is currently cwnd-blocked. wrr_select
+-     * (just before) already chose a sendable path for the current packet;
+-     * the pin is what subsequent packets of this flow will key off, and
+-     * it must reflect the long-term best path, not transient cwnd state.
+-     *
+-     * Under sym fabric (equal weights → equal quanta), wrr_select
+-     * decrements one path's deficit by 1 → pick_pin sees the OTHER path
+-     * as max → flows alternate naturally. Under asym (3:1+ quantum), the
+-     * wide path stays max-deficit through several decrements before
+-     * narrow gets its turn, giving weighted alternation.
+-     */
+-    int best = -1;
+-    int64_t best_deficit = INT64_MIN;
+-    for (int i = 0; i < s->n_paths; i++) {
+-        xqc_path_ctx_t *path = wlb_find_path_ctx(conn, s->paths[i].path_id);
+-        if (path == NULL) {
+-            continue;
++    int n = s->n_paths;
++    if (n == 0) {
++        return WLB_NO_PATH_ID;
++    }
++    uint64_t now_us = xqc_monotonic_timestamp();
++
++    /* Exploration slot: periodically pin to the least-recently-pinned path. */
++    s->pin_seq++;
++    if (s->pin_seq % WLB_EXPLORE_EVERY == 0) {
++        int best = -1;
++        uint64_t oldest = 0;
++        for (int i = 0; i < n; i++) {
++            if (best < 0 || s->paths[i].last_pin_us < oldest) {
++                oldest = s->paths[i].last_pin_us;
++                best = i;
++            }
+         }
+-        if (s->paths[i].deficit > best_deficit) {
+-            best_deficit = s->paths[i].deficit;
++        if (best >= 0) {
++            s->paths[best].last_pin_us = now_us;
++            s->paths[best].pin_count++;
++            return s->paths[best].path_id;
++        }
++    }
++
++    /* Capacity-proportional WDRR by est_bw weight. */
++    int64_t best_c = INT64_MIN;
++    int best = -1;
++    uint64_t total_w = 0;
++    for (int i = 0; i < n; i++) {
++        uint64_t eff = s->paths[i].weight ? s->paths[i].weight : 1;
++        s->paths[i].pin_credit += (int64_t)eff;
++        total_w += eff;
++        if (s->paths[i].pin_credit > best_c) {
++            best_c = s->paths[i].pin_credit;
+             best = i;
+         }
+     }
+-    return (best >= 0) ? s->paths[best].path_id : WLB_NO_PATH_ID;
++    if (best >= 0) {
++        s->paths[best].pin_credit -= (int64_t)total_w;
++        s->paths[best].last_pin_us = now_us;
++        s->paths[best].pin_count++;
++        return s->paths[best].path_id;
++    }
++    return WLB_NO_PATH_ID;
+ }
+ 
+ /**
+@@ -1019,12 +923,16 @@ xqc_wlb_scheduler_get_path(void *scheduler,
+         wlb_refresh_paths(s, conn);
+         wlb_start_round(s);
+         xqc_log(conn->log, XQC_LOG_INFO,
+-                "|wlb|round_start|n_paths:%d|p0:%ui|d0:%lld|p1:%ui|d1:%lld|",
++                "|wlb|round_start|n_paths:%d|p0:%ui|d0:%lld|bw0:%llu|pc0:%llu|p1:%ui|d1:%lld|bw1:%llu|pc1:%llu|",
+                 s->n_paths,
+                 (unsigned)(s->n_paths > 0 ? s->paths[0].path_id : UINT32_MAX),
+                 (long long)(s->n_paths > 0 ? s->paths[0].deficit : -1),
++                (unsigned long long)(s->n_paths > 0 ? s->paths[0].est_bw : 0),
++                (unsigned long long)(s->n_paths > 0 ? s->paths[0].pin_count : 0),
+                 (unsigned)(s->n_paths > 1 ? s->paths[1].path_id : UINT32_MAX),
+-                (long long)(s->n_paths > 1 ? s->paths[1].deficit : -1));
++                (long long)(s->n_paths > 1 ? s->paths[1].deficit : -1),
++                (unsigned long long)(s->n_paths > 1 ? s->paths[1].est_bw : 0),
++                (unsigned long long)(s->n_paths > 1 ? s->paths[1].pin_count : 0));
+         s->force_refresh_paths = 0;
+     }
+ 
