@@ -1,0 +1,32 @@
+From: opencode <opencode@local>
+Date: Thu, 28 Aug 2026 00:00:00 +0000
+Subject: [PATCH] mqvpn-server-nat: retry interface detection at startup
+
+detect_iface() issued a single `ip route get 8.8.8.8` and, if it returned
+nothing (no default route yet at container-start time), the caller silently
+skipped adding the MASQUERADE/FORWARD rules. When two server instances start
+near-simultaneously one of them can hit this window, leaving that instance's
+client subnet without SNAT and breaking egress for the corresponding tunnel.
+
+Retry for up to 30s so the rules are added once the default route appears.
+--- a/scripts/mqvpn-server-nat.sh
++++ b/scripts/mqvpn-server-nat.sh
+@@ -57,8 +57,17 @@ STATE_DIR="/run/mqvpn"
+ STATE_DIR="/run/mqvpn"
+ 
+ # Detect default outbound interface
+ detect_iface() {
+-    ip route get 8.8.8.8 2>/dev/null | grep -oP 'dev \K\S+' || true
++    local iface="" _tries=0
++    while [ -z "$iface" ] && [ "$_tries" -lt 30 ]; do
++        iface=$(ip route get 8.8.8.8 2>/dev/null | grep -oP 'dev \K\S+' || true)
++        if [ -z "$iface" ]; then
++            sleep 1
++            _tries=$((_tries + 1))
++        fi
++    done
++    [ "$_tries" -ge 30 ] && echo "mqvpn-server-nat: warning: default interface not found after 30s" >&2
++    echo "$iface"
+ }
+ 
+ setup() {

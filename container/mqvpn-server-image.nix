@@ -11,6 +11,12 @@ let
   natScript = pkgs.stdenv.mkDerivation {
     pname = "mqvpn-server-nat";
     inherit (mqvpnDbg) version src;
+    # nat script は mqvpn-src の patches ではなく src から直接コピーされるため、
+    # ここで個別にパッチを当てる (起動時の iface 検出リトライ化)
+    patches = [
+      ../patches/mqvpn-server-nat-retry-iface.patch
+      ../patches/mqvpn-server-nat-teardown-per-subnet.patch
+    ];
     dontBuild = true;
     dontFixup = true;
     installPhase = ''
