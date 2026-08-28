@@ -5,7 +5,7 @@
   ...
 }:
 let
-  mqvpn = pkgs.callPackage ./pkgs/mqvpn-src.nix { };
+  mqvpn = pkgs.callPackage ./pkgs/mqvpn-dbg.nix { };
 
   live-chart = pkgs.callPackage ./pkgs/live-chart.nix { };
 

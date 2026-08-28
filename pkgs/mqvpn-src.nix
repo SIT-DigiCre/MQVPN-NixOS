@@ -30,6 +30,10 @@ in stdenv.mkDerivation {
     #   上限 ~600M→~1.06Gbps。間隔は XQC_REINJ_SCAN_INTERVAL_US で調整可。
     # メンテ: vendored xquic の fork 差分が増える(アップグレード追従コスト)。
     ../patches/xquic-reinjection-rate-limit.patch
+    # 計測用: スケジューラの「選択(意図)」を per-path に集計し /tmp に吐く。
+    # 転送量(delivered)と比較して「選択は比例だが配送が追いつかない(CC/フロー数)」
+    # か「選択自体が偏っている(残存スケジューラバイアス)」かを切り分けるため。
+    ../patches/xquic-wlb-selcount.patch
   ];
 
   dontUseCmakeConfigure = true;

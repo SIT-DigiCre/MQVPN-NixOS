@@ -1,0 +1,134 @@
+diff --git a/third_party/xquic/src/transport/scheduler/xqc_scheduler_wlb.c b/third_party/xquic/src/transport/scheduler/xqc_scheduler_wlb.c
+index 233c7a4..5f59ef7 100644
+--- a/third_party/xquic/src/transport/scheduler/xqc_scheduler_wlb.c
++++ b/third_party/xquic/src/transport/scheduler/xqc_scheduler_wlb.c
+@@ -48,6 +48,8 @@
+ #include "src/transport/xqc_send_ctl.h"
+ #include "src/transport/xqc_multipath.h"
+ #include "src/common/xqc_time.h"
++#include <unistd.h>
++#include <time.h>
+ 
+ /* ---------- constants ---------- */
+ 
+@@ -79,6 +81,18 @@
+  */
+ #define WLB_FLOW_TOMBSTONE    0xFFFFFFFFU
+ 
++/* per-packet selection accounting (measurement only) */
++#define WLB_REC_SEL(s, pid, pkt) \
++    do { \
++        for (int _wi = 0; _wi < (s)->n_paths; _wi++) { \
++            if ((s)->paths[_wi].path_id == (pid)) { \
++                (s)->paths[_wi].sel_pkts  += 1; \
++                (s)->paths[_wi].sel_bytes += (uint64_t)(pkt)->po_used_size; \
++                break; \
++            } \
++        } \
++    } while (0)
++
+ /* ---------- data types ---------- */
+ 
+ /** Flow table entry — maps an inner-flow hash to a QUIC path. */
+@@ -99,6 +113,8 @@ typedef struct {
+     uint64_t    prev_ts;    /* timestamp of last rate sample (usec) */
+     uint64_t    last_pin_us; /* last time this path received a flow pin (exploration age) */
+     uint64_t    pin_count;  /* cumulative pins on this path (observability) */
++    uint64_t    sel_bytes;  /* cumulative scheduler-selected bytes (intended assignment) */
++    uint64_t    sel_pkts;   /* cumulative scheduler-selected packets (intended assignment) */
+ } wlb_path_weight_t;
+ 
+ /** Top-level scheduler state, allocated by xquic via xqc_wlb_scheduler_size(). */
+@@ -121,6 +137,7 @@ typedef struct {
+      * re-pins all TCP flows to the just-added — possibly narrow — path. */
+     xqc_bool_t           ever_lost_path;
+     xqc_log_t           *log;
++    time_t               last_sel_log_sec; /* throttle for sel-log file write */
+ } xqc_wlb_scheduler_t;
+ 
+ /* Forward declaration — used by wlb_flow_expire() for loss-triggered eviction */
+@@ -520,6 +537,8 @@ wlb_refresh_paths(xqc_wlb_scheduler_t *s, xqc_connection_t *conn)
+         s->paths[n].prev_ts = 0;
+         s->paths[n].last_pin_us = 0;
+         s->paths[n].pin_count = 0;
++        s->paths[n].sel_bytes = 0;
++        s->paths[n].sel_pkts = 0;
+         for (int j = 0; j < old_n; j++) {
+             if (old[j].path_id == path->path_id) {
+                 s->paths[n].deficit         = old[j].deficit;
+@@ -529,6 +548,8 @@ wlb_refresh_paths(xqc_wlb_scheduler_t *s, xqc_connection_t *conn)
+                 s->paths[n].prev_ts         = old[j].prev_ts;
+                 s->paths[n].last_pin_us     = old[j].last_pin_us;
+                 s->paths[n].pin_count       = old[j].pin_count;
++                s->paths[n].sel_bytes       = old[j].sel_bytes;
++                s->paths[n].sel_pkts        = old[j].sel_pkts;
+                 break;
+             }
+         }
+@@ -816,6 +837,30 @@ xqc_wlb_scheduler_init(void *scheduler, xqc_log_t *log, xqc_scheduler_params_t *
+     memset(s, 0, sizeof(*s));
+     s->log = log;
+     s->recovery_prefer_path_id = WLB_NO_PATH_ID;
++    s->last_sel_log_sec = 0;
++}
++
++/* measurement: dump cumulative per-path selection counters to a file at ~1Hz */
++static void
++wlb_sel_log(xqc_wlb_scheduler_t *s)
++{
++    time_t now = time(NULL);
++    if (now - s->last_sel_log_sec < 1)
++        return;
++    s->last_sel_log_sec = now;
++    char sel_log[256];
++    snprintf(sel_log, sizeof(sel_log), "/tmp/mqvpn_wlb_sel_%d.log", (int)getpid());
++    FILE *sfp = fopen(sel_log, "a");
++    if (sfp != NULL) {
++        for (int i = 0; i < s->n_paths; i++) {
++            fprintf(sfp, "ts=%lld path=%llu sel_bytes=%llu sel_pkts=%llu\n",
++                    (long long)now,
++                    (unsigned long long)s->paths[i].path_id,
++                    (unsigned long long)s->paths[i].sel_bytes,
++                    (unsigned long long)s->paths[i].sel_pkts);
++        }
++        fclose(sfp);
++    }
+ }
+ 
+ /* Sentinel: per-packet WRR without flow pinning (UDP/QUIC datagrams) */
+@@ -900,6 +945,8 @@ xqc_wlb_scheduler_get_path(void *scheduler,
+                 xqc_log(conn->log, XQC_LOG_INFO,
+                         "|wlb|flow_hit|flow:%ui|path:%ui|",
+                         packet_out->po_flow_hash, path->path_id);
++                WLB_REC_SEL(s, path->path_id, packet_out);
++                wlb_sel_log(s);
+                 return path;
+             }
+             if (path) {
+@@ -927,6 +974,8 @@ xqc_wlb_scheduler_get_path(void *scheduler,
+             xqc_log(conn->log, XQC_LOG_INFO,
+                     "|wlb|recovery_prefer|flow:%ui|path:%ui|",
+                     packet_out->po_flow_hash, rpath->path_id);
++            WLB_REC_SEL(s, rpath->path_id, packet_out);
++            wlb_sel_log(s);
+             return rpath;
+         }
+     }
+@@ -985,6 +1034,8 @@ xqc_wlb_scheduler_get_path(void *scheduler,
+              * for proper distribution. Pinning here would lock all early
+              * flows to paths[0] permanently (Fix A prevents the wipe that
+              * would otherwise rescue them). */
++            WLB_REC_SEL(s, path->path_id, packet_out);
++            wlb_sel_log(s);
+             return path;
+         }
+         if (cc_blocked) {
+@@ -1007,6 +1058,8 @@ xqc_wlb_scheduler_get_path(void *scheduler,
+     }
+ 
+     if (sel_path_id != UINT64_MAX) {
++        WLB_REC_SEL(s, sel_path_id, packet_out);
++        wlb_sel_log(s);
+         if (pin_flow) {
+             /* Pin to the highest-deficit (≈ highest LATE-weight) path even if
+              * it is currently cwnd-blocked. The wrr_select above already chose

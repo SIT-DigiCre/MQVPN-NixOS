@@ -3,14 +3,14 @@
 }:
 let
   mqvpnExporter = pkgs.callPackage ../pkgs/mqvpn-exporter.nix { };
-  mqvpnSrc = pkgs.callPackage ../pkgs/mqvpn-src.nix { };
+  mqvpnDbg = pkgs.callPackage ../pkgs/mqvpn-dbg.nix { };
 
   # 本家 nat スクリプト + sysctl ラッパ。コンテナから net.* sysctl 書込は
   # 常に EPERM (値は netns 作成時にホストから継承) ため、sysctl スタブが
   # net.* への -w のみ成功扱いとする (他は本来の sysctl へ渡す)
   natScript = pkgs.stdenv.mkDerivation {
     pname = "mqvpn-server-nat";
-    inherit (mqvpnSrc) version src;
+    inherit (mqvpnDbg) version src;
     dontBuild = true;
     dontFixup = true;
     installPhase = ''
@@ -52,7 +52,7 @@ let
     name = "mqvpn-server-root";
     paths = [
       natScript
-      mqvpnSrc
+      mqvpnDbg
       mqvpnExporter
       pkgs.bash
       pkgs.dockerTools.binSh
