@@ -44,6 +44,7 @@ fi
 # server.conf (JSON)。コンテナ内では /etc/mqvpn にマウントされる前提。
 cat > "$CONF_DIR/server.conf" <<EOF
 {
+  "control_listen": "127.0.0.1:9090",
   "mode": "server",
   "listen": "0.0.0.0:443",
   "subnet": "192.168.0.0/24",
@@ -51,13 +52,21 @@ cat > "$CONF_DIR/server.conf" <<EOF
   "cert_file": "/etc/mqvpn/server.crt",
   "key_file": "/etc/mqvpn/server.key",
   "auth_key": "$AUTH_KEY",
-  "control_listen": "127.0.0.1:9090",
   "log_level": "info",
   "max_clients": 64,
   "scheduler": "wlb",
   "cc": "bbr",
   "reinjection": "deadline",
-  "hybrid": { "enabled": false, "tcp": "auto", "tcp_max_flows": 2048 }
+  "reorder": {
+    "enabled": true,
+    "max_wait_ms": 100,
+    "cap_packets": 4096
+  },
+  "hybrid": {
+    "enabled": false,
+    "tcp": "auto",
+    "tcp_max_flows": 2048
+  }
 }
 EOF
 

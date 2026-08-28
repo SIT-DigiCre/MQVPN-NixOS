@@ -94,6 +94,11 @@ in
         scheduler = "wlb";
         cc = "bbr";
         reinjection = "deadline";
+        reorder = {
+          enabled = "on";
+          max_wait_ms = 100;
+          cap_packets = 4096;
+        };
         manage_routes = false;
         hybrid = config.services.mqvpn.hybrid;
         paths = config.services.mqvpn.interfaces;
