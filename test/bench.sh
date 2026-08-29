@@ -26,14 +26,18 @@ set -euo pipefail
 #       eduroam系15ms×2 + ロス) を適用
 #
 #   ./test/bench.sh collapse3
-#       本番 3x Starlink 崩壊再現: WAN 3 本 (eth1=A / eth3=B / eth4=C) に
-#       A=30ms/458M, B=42ms+pareto/400M, C=35ms/450M を適用し、TCP 単一/多フロー
-#       での 1 パス固着(崩壊) と UDP での全パス分散を per-path で表示。
+#       本番 3x Starlink の実測物理回線再現: WAN 3 本 (eth1=A / eth3=B / eth4=C) に
+#       実測を適用 — 下り A=217M/12ms, B=175M/11ms, C=107M/12ms+pareto
+#       (chiken 2026-08-28: 強制出口下り 217/175/107M, 直結 ping RTT 24.8/22.5/23.1ms)。
+#       実 RTT 差が小さいため再設計スケジューラは容量比例配分(崩壊なし)となる。
+#       RTT は実測 min/max を jitter で変動(容量 rate は固定平均値)。
+#       TCP 単一/多フローでの配分と UDP 全パス分散を per-path で表示。
 #
 #   ./test/bench.sh latab [sec]
-#       容量は collapse3 と同一、RTT だけ広げた不均質 (eth1=10ms / eth3=200ms /
-#       eth4=50ms)。バルク埋め負荷下でトンネル RTT(p50/p95/p99) と小パケット UDP
-#       jitter を取得。pin ポリシー(純容量 vs RTTダンプ) の A/B 用シナリオ。
+#       容量は collapse3 と同一(実測 217/175/107M)、RTT だけ広げた不均質
+#       (eth1=10ms / eth3=200ms / eth4=50ms)。バルク埋め負荷下でトンネル
+#       RTT(p50/p95/p99) と小パケット UDP jitter を取得。pin ポリシー
+#       (純容量 vs RTTダンプ) の A/B 用シナリオ。
 #
 #   ./test/bench.sh measure [tcp|udp] [P] [rate] [dir] [sec]
 #       任意の netem 下で iperf3 を流し、各 WAN の rx スループット・ceiling 比・
@@ -170,6 +174,13 @@ clear_netem() {
 # egress に netem を掛ける。mqvpn.interfaces = [eth1,eth3,eth4] の実タップは
 # mogami-vm.nix allNics の順: eth1=trw0, eth3=trw1, eth4=trw2  (eth2 は tr-mgmt)。
 host_wan=(trw0 trw1 trw2)
+
+# --- 実測物理回線モデル (selection-vs-delivered.md 2026-08-28 強制出口 n=5) ---
+# 下り容量平均 Mbps (rate は固定値)。RTT は実測 min/max を jitter で変動。
+declare -A RATE_MEAN=( [eth1]=217 [eth3]=175 [eth4]=107 )
+# 各 WAN の netem delay 指定 (apply_* が上書き)。RTT 変動(jitter+distribution)を保持。
+declare -A DELAY_SPEC=( [eth1]="delay 12ms 3ms distribution normal" [eth3]="delay 11ms 4ms distribution normal" [eth4]="delay 12ms 6ms distribution pareto" )
+
 clear_netem_host() {
   for t in "${host_wan[@]}"; do sudo -n tc qdisc del dev "$t" root 2>/dev/null || true; done; echo netem-cleared-host
 }
@@ -188,19 +199,25 @@ apply_hetero_host() {
   done; echo applied-host
 }
 apply_collapse3_host() {
-  local specs=("delay 30ms rate 458mbit" "delay 42ms 15ms distribution pareto rate 400mbit" "delay 35ms rate 450mbit")
+  # 実測物理容量/RTT。下り 217/175/107M(平均), RTT 平均 24.8/22.5/23.1ms→片道≈/2 で変動。
+  # C(Mini) のみ最大 40.9ms のジッター(pareto)。netem は対称なので下り容量でモデル。
+  # DELAY_SPEC/RATE_MEAN は collapse3 側で設定済(本関数は host 側 egress に同じを適用)。
+  local i w
   for i in "${!host_wan[@]}"; do
-    sudo -n tc qdisc replace dev "${host_wan[$i]}" root netem ${specs[$i]} limit 100000
+    w=${rtr_wan[$i]}
+    sudo -n tc qdisc replace dev "${host_wan[$i]}" root netem ${DELAY_SPEC[$w]} rate ${RATE_MEAN[$w]}mbit limit 100000
   done; echo applied-host
 }
 
-# 容量は collapse3 と同一、RTT だけ広げる (eth1=10ms eth3=200ms eth4=50ms)。
+# latab: 容量は collapse3 と同一(実測 217/175/107M)、RTT だけ広げる。
 # 容量を固定し RTT のみ変化させることで、pin ポリシーの違い(純容量 vs RTTダンプ)
 # を孤立計測する (latab シナリオ用)。
 apply_latab_host() {
-  local specs=("delay 10ms rate 458mbit" "delay 200ms rate 400mbit" "delay 50ms rate 450mbit")
+  # 容量は collapse3 と同一(実測 217/175/107M, 固定平均値)。RTT は latab 用に拡大(下を参照)。
+  local i w
   for i in "${!host_wan[@]}"; do
-    sudo -n tc qdisc replace dev "${host_wan[$i]}" root netem ${specs[$i]} limit 100000
+    w=${rtr_wan[$i]}
+    sudo -n tc qdisc replace dev "${host_wan[$i]}" root netem ${DELAY_SPEC[$w]} rate ${RATE_MEAN[$w]}mbit limit 100000
   done; echo applied-host
 }
 
@@ -239,34 +256,38 @@ apply_hetero() {
   ssh_rtr "$cmd echo applied" 2>/dev/null
 }
 
-# 本番 3x Starlink 崩壊再現 (WAN は 3 本に削減済み、本番物理 3 回線と一致)。
-# idx0 = Starlink A (最安・最安定・最高率 → ピン集中先): delay 30ms rate 458mbit
-# idx1 = Starlink B (ジッター大, 稀スパイク=pareto):     delay 42ms 15ms distribution pareto rate 400mbit
-# idx2 = Starlink C (中間):                              delay 35ms rate 450mbit
+# 本番 3x Starlink の実測物理回線 (selection-vs-delivered.md 2026-08-28 強制出口 n=5
+# 平均下り + real-env.md §3.1 直結 ping RTT)。WAN 3 本と一致。
+# 下り容量: A(eth1,Flat)=217M / B(eth3,Move)=175M / C(eth4,Mini)=107M (合計≈499M)。
+# RTT(router→VPS 直結): A=24.8 B=22.5 C=23.1ms(平均)、C のみ最大 40.9ms のジッター。
+# netem delay は片道なので測定 RTT/2 を指定 (ラボ ping RTT≈実測)。上りは 36/37/20M だが
+# netem は対称のため下り容量でモデル (ACK 少数のため下り律速にならず)。
+# 実 RTT 差は小さいため再設計スケジューラは容量比例配分となり、1 パス崩壊は再現しない
+# (本番 real-env.md「崩壊なし」と整合)。崩壊を見たいなら latab/uneven で RTT 差を拡大。
 apply_collapse3() {
-  local specs=(
-    "delay 30ms rate 458mbit"
-    "delay 42ms 15ms distribution pareto rate 400mbit"
-    "delay 35ms rate 450mbit"
-  )
-  local cmd="" i
+  # 実測物理容量/RTT: 下り 217/175/107M(平均), RTT 平均 24.8/22.5/23.1ms を片道≈/2 で
+  # 変動付き(min/max は選択/配分に影響)。C(Mini) のみジッター tail 大(pareto, 最大 40.9ms)。
+  # 容量 rate は固定平均値(217/175/107M)。RTT は実測 min/max を jitter で変動。
+  DELAY_SPEC[eth1]="delay 12ms 3ms distribution normal"
+  DELAY_SPEC[eth3]="delay 11ms 4ms distribution normal"
+  DELAY_SPEC[eth4]="delay 12ms 6ms distribution pareto"
+  local cmd="" i w
   for i in "${!rtr_wan[@]}"; do
-    cmd+="sudo -n tc qdisc replace dev ${rtr_wan[$i]} root netem ${specs[$i]} limit 100000;"
+    w=${rtr_wan[$i]}
+    cmd+="sudo -n tc qdisc replace dev $w root netem ${DELAY_SPEC[$w]} rate ${RATE_MEAN[$w]}mbit limit 100000;"
   done
   ssh_rtr "$cmd echo applied" 2>/dev/null
 }
 
-# latab: 容量同一・RTT のみ広げた不均質 (collapse3 の RTT 差を意図的に拡大)。
-# idx0 = eth1: 10ms/458M   idx1 = eth3: 200ms/400M   idx2 = eth4: 50ms/450M
+# latab: 容量同一・RTT のみ広げた不均質 (collapse3 の容量 217/175/107M を維持し、
+# RTT 差を意図的に拡大)。idx0 = eth1: 10ms/217M  idx1 = eth3: 200ms/175M  idx2 = eth4: 50ms/107M
 apply_latab() {
-  local specs=(
-    "delay 10ms rate 458mbit"
-    "delay 200ms rate 400mbit"
-    "delay 50ms rate 450mbit"
-  )
-  local cmd="" i
+  # 容量は collapse3 と同一(実測 217/175/107M, 固定平均値)。RTT のみ拡大して pin ポリシーを孤立計測。
+  DELAY_SPEC[eth1]="delay 10ms"; DELAY_SPEC[eth3]="delay 200ms"; DELAY_SPEC[eth4]="delay 50ms"
+  local cmd="" i w
   for i in "${!rtr_wan[@]}"; do
-    cmd+="sudo -n tc qdisc replace dev ${rtr_wan[$i]} root netem ${specs[$i]} limit 100000;"
+    w=${rtr_wan[$i]}
+    cmd+="sudo -n tc qdisc replace dev $w root netem ${DELAY_SPEC[$w]} rate ${RATE_MEAN[$w]}mbit limit 100000;"
   done
   ssh_rtr "$cmd echo applied" 2>/dev/null
 }
@@ -695,7 +716,7 @@ case "$CMD" in
     ;;
   latab)
     clear_netem; apply_latab; apply_latab_host; sleep 8
-    do_latab "${1:-15}" "latab (eth1=10ms/458M eth3=200ms/400M eth4=50ms/450M)"
+    do_latab "${1:-15}" "latab (cap=collapse3 実測 217/175/107M; RTT eth1=10ms eth3=200ms eth4=50ms)"
     ;;
   uneven)
     clear_netem; apply_uneven; apply_uneven_host; sleep 8

@@ -84,8 +84,8 @@ pairs=(eth1:0,1 eth3:2,3 eth4:4,5 mqvpn0:6,7 mqvpn1:8,9)
 echo
 echo "=== [result] per-interface throughput (Mbps, window=$DUR s) ==="
 printf "  %-8s %10s %10s %12s\n" IFACE "rx+tx_Mbps" "ceiling" "util%"
-# ceiling 配列 (eth1/3/4 のみ)
-declare -A CEIL=( [eth1]=458 [eth3]=400 [eth4]=450 )
+# ceiling 配列 (eth1/3/4 のみ) — 実測物理下り容量 (selection-vs-delivered.md 2026-08-28)
+declare -A CEIL=( [eth1]=217 [eth3]=175 [eth4]=107 )
 total=0
 for p in "${pairs[@]}"; do
   name="${p%%:*}"; idx="${p##*:}"; rx=${idx%,*}; tx=${idx#*,}
