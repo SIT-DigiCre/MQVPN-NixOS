@@ -41,6 +41,11 @@ let
     control_listen = "127.0.0.1:9090";
     log_level = "info";
     reinjection = "deadline";
+    reorder = {
+      enabled = "on";
+      max_wait_ms = 100;
+      cap_packets = 4096;
+    };
     hybrid = {
       enabled = false;
       tcp = "auto";

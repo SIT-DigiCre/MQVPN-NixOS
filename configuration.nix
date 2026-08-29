@@ -73,6 +73,16 @@ in
    description = "MQVPN hybrid TCP lane config";
   };
 
+  options.services.mqvpn.reorder = lib.mkOption {
+    type = lib.types.anything;
+    default = {
+      enabled = "off";
+      max_wait_ms = 100;
+      cap_packets = 4096;
+    };
+    description = "MQVPN reorder shim config (client TUN side)";
+  };
+
   options.services.mqvpn.lanInterface = lib.mkOption {
     type = lib.types.str;
     default = "enp10s0";
@@ -94,11 +104,7 @@ in
         scheduler = "wlb";
         cc = "bbr";
         reinjection = "deadline";
-        reorder = {
-          enabled = "on";
-          max_wait_ms = 100;
-          cap_packets = 4096;
-        };
+        reorder = config.services.mqvpn.reorder;
         manage_routes = false;
         hybrid = config.services.mqvpn.hybrid;
         paths = config.services.mqvpn.interfaces;
@@ -174,6 +180,14 @@ in
       # 1. ホスト名をもがみにする
       # ---------------------------------------------------------------------
       networking.hostName = "mogami";
+
+      # 本番: reorder 両端 ON（server 側も on）。ラボは mogami-vm.nix で上書き。
+      # 1 端 off なら RAW に退避するため、部分適用も安全。
+      services.mqvpn.reorder = {
+        enabled = "on";
+        max_wait_ms = 100;
+        cap_packets = 4096;
+      };
 
       # ---------------------------------------------------------------------
       # 2. 基本設定

@@ -58,7 +58,7 @@ cat > "$CONF_DIR/server.conf" <<EOF
   "cc": "bbr",
   "reinjection": "deadline",
   "reorder": {
-    "enabled": true,
+    "enabled": "on",
     "max_wait_ms": 100,
     "cap_packets": 4096
   },

@@ -108,6 +108,7 @@ build_and_start() {
   local link="$1" attr="$2" suffix="$3"
   echo "=== building $attr ==="
   rm -rf "$SCRIPT_DIR/result-$link" 2>/dev/null || true
+  rm -f /tmp/result-$link 2>/dev/null || true
   nix build "path:$REPO_DIR#nixosConfigurations.$attr.config.system.build.vm" \
     --out-link /tmp/result-$link --print-build-logs
   ln -sf /tmp/result-$link "$SCRIPT_DIR/result-$link" 2>/dev/null || true
