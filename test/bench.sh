@@ -421,7 +421,7 @@ compute_fairness() {
   for i in "${!_M[@]}"; do x=${_M[i]:-0}; sum=$((sum+x)); sumsq=$((sumsq+x*x)); n=$((n+1)); sceil=$((sceil+${_C[i]:-0})); done
   FAIR_JAIN=0; [ "$sumsq" -gt 0 ] && FAIR_JAIN=$(awk "BEGIN{printf \"%.4f\",($sum*$sum)/($n*$sumsq)}")
   FAIR_CPRMSE=null
-  if [ "$sceil" -gt 0 ]; then
+  if [ "$sceil" -gt 0 ] && [ "$total" -gt 0 ]; then
     local se=0 i
     for i in "${!_M[@]}"; do local ideal=$(( total * ${_C[i]:-0} / sceil )); local e=$(( ${_M[i]:-0} - ideal )); [ "$e" -lt 0 ] && e=$(( -e )); se=$(( se + e*e )); done
     FAIR_CPRMSE=$(awk "BEGIN{printf \"%.1f\",sqrt($se)/$total*100}")
@@ -483,38 +483,52 @@ measure_once() {
     CEIL[$w]=${c:-0}
   done
 
-  # 負荷は warmup_max まで流し、適応モードなら収束を待って実窓を決める
-  local wp=$(( warmup_max + sec + 5 ))
-  samp_start "$((wp + 4))"
-  ssh_cli "iperf3 -c $TARGET -p $PORT ${uflag} ${flag} -P $P -b ${rate}M -t $wp > /tmp/mb.txt 2>&1" &
-  local IP=$!
+  # 負荷を流しつつ定常窓を計測。単一フロー(P=1)ではウォームアップ中に TCP コネクションが
+  # リセットされると計測窓が 0 になる(フレーク)。TOTAL=0 の場合は再計測する。
+  # 回数は BENCH_RETRY で指定(既定 3)。
+  local attempt=0 max_attempts="${BENCH_RETRY:-3}"
+  local tot=0 w_used="$warmup" mbps ceil util i=0
+  local -a MBPS=() CEIL2=() B0=() B1=()
+  while :; do
+    attempt=$((attempt + 1))
+    local wp=$(( warmup_max + sec + 5 ))
+    samp_start "$((wp + 4))"
+    ssh_cli "iperf3 -c $TARGET -p $PORT ${uflag} ${flag} -P $P -b ${rate}M -t $wp > /tmp/mb.txt 2>&1" &
+    local IP=$!
 
-  local w_used="$warmup"
-  if [ "$adaptive" = 1 ]; then
-    w_used=$(wait_wlb_steady "$warmup" "$warmup_max")
-  else
-    sleep "$warmup"
-  fi
+    w_used="$warmup"
+    if [ "$adaptive" = 1 ]; then
+      w_used=$(wait_wlb_steady "$warmup" "$warmup_max")
+    else
+      sleep "$warmup"
+    fi
 
-  # 定常窓 [B0 -> B1] のみで集計
-  local -a B0=() i=0 w
-  for w in "${rtr_wan[@]}"; do B0[$i]=$(rx_bytes "$w"); i=$((i + 1)); done
-  sleep "$sec"
-  local -a B1=()
-  i=0
-  for w in "${rtr_wan[@]}"; do B1[$i]=$(rx_bytes "$w"); i=$((i + 1)); done
-  kill "$IP" 2>/dev/null; wait "$IP" 2>/dev/null || true
+    # 定常窓 [B0 -> B1] のみで集計
+    B0=(); i=0
+    for w in "${rtr_wan[@]}"; do B0[$i]=$(rx_bytes "$w"); i=$((i + 1)); done
+    sleep "$sec"
+    B1=(); i=0
+    for w in "${rtr_wan[@]}"; do B1[$i]=$(rx_bytes "$w"); i=$((i + 1)); done
+    kill "$IP" 2>/dev/null; wait "$IP" 2>/dev/null || true
+
+    tot=0; MBPS=(); CEIL2=(); i=0
+    for w in "${rtr_wan[@]}"; do
+      mbps=$(( (B1[i] - B0[i]) * 8 / (sec * 1000000) ))
+      ceil=${CEIL[$w]}
+      tot=$((tot + mbps)); MBPS[i]=$mbps; CEIL2[i]=$ceil; i=$((i + 1))
+    done
+
+    if [ "$tot" -gt 0 ] || [ "$attempt" -ge "$max_attempts" ]; then break; fi
+    echo "  (retry $attempt/$max_attempts: TOTAL=0, re-running measurement)" >&2
+  done
 
   echo "== $proto P=$P $dir @ ${sec}s steady (after ${w_used}s warmup; WAN: ${rtr_wan[*]}) =="
-  local tot=0 mbps ceil util
-  local -a MBPS=() CEIL2=()
   i=0
   for w in "${rtr_wan[@]}"; do
-    mbps=$(( (B1[i] - B0[i]) * 8 / (sec * 1000000) ))
-    ceil=${CEIL[$w]}
+    mbps=${MBPS[i]}; ceil=${CEIL[$w]}
     if [ "$ceil" = 0 ]; then util="NA"; else util=$(( mbps * 100 / ceil )); fi
     printf "  %-6s %8d Mbps  ceil %sM  util %s%%\n" "$w" "$mbps" "$ceil" "$util"
-    tot=$((tot + mbps)); MBPS[i]=$mbps; CEIL2[i]=$ceil; i=$((i + 1))
+    i=$((i + 1))
   done
   echo "  TOTAL (tunnel-bound) = ${tot} Mbps"
   compute_fairness MBPS CEIL2 "$tot"
@@ -522,7 +536,6 @@ measure_once() {
   emit_bench_json "measure" "$proto P=$P $dir @ ${sec}s steady (after ${w_used}s warmup)" "$w_used" "$tot" MBPS CEIL2 "${rtr_wan[*]}"
   echo "  client: $(ssh_cli 'g=$(grep -E "\[SUM\] 0\.00-" /tmp/mb.txt 2>/dev/null | tail -1); [ -z "$g" ] && g=$(grep -E "\[SUM\]" /tmp/mb.txt 2>/dev/null | tail -1); echo "$g"' 2>&1 | grep -vE 'fetching|Warning:' | tail -1)"
   echo "  srvCPU: $(samp_max S)  rtrCPU: $(samp_max R)"
-  echo "  srvCores: $(samp_cores S)"
   echo "  rtrCores: $(samp_cores R)"
 }
 
