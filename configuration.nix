@@ -29,21 +29,11 @@ in
 {
   options.services.mqvpn.interfaces = lib.mkOption {
     type = lib.types.listOf lib.types.str;
-    default = [
-      "enp1s0f0"
-      "enp1s0f1"
-      "enp1s0f2"
-      "enp1s0f3"
-      "enp6s0"
-      "enp8s0"
-      "enp9s0"
-    ];
     description = "NICs used by MQVPN multi-WAN paths";
   };
 
   options.services.mqvpn.auth = lib.mkOption {
     type = lib.types.anything;
-    default = builtins.fromJSON (builtins.readFile ./mqvpn-auth.json);
     description = ''
       MQVPN クライアントのシークレット設定: auth_key とサーバー IP (server_addr は
       **IP のみ**。port を含めてはならない — port は公開情報で services.mqvpn.clientPorts
@@ -54,7 +44,6 @@ in
 
   options.services.mqvpn.clientPorts = lib.mkOption {
     type = lib.types.listOf lib.types.port;
-    default = [ 443 444 ];
     description = ''
       クライアントの接続先 server port リスト。サーバー IP (auth.server_addr) と
       WAN NIC (interfaces) は全クライアント共通のため、port のみ個別指定する。
@@ -65,27 +54,16 @@ in
 
   options.services.mqvpn.hybrid = lib.mkOption {
     type = lib.types.anything;
-    default = {
-      enabled = false;
-      tcp = "auto";
-      tcp_max_flows = 2048;
-    };
-   description = "MQVPN hybrid TCP lane config";
+    description = "MQVPN hybrid TCP lane config";
   };
 
   options.services.mqvpn.reorder = lib.mkOption {
     type = lib.types.anything;
-    default = {
-      enabled = "off";
-      max_wait_ms = 100;
-      cap_packets = 4096;
-    };
     description = "MQVPN reorder shim config (client TUN side)";
   };
 
   options.services.mqvpn.lanInterface = lib.mkOption {
     type = lib.types.str;
-    default = "enp10s0";
     description = "LAN-facing interface (kea DHCP / NAT / 起動待機の対象)";
   };
 
@@ -181,12 +159,29 @@ in
       # ---------------------------------------------------------------------
       networking.hostName = "mogami";
 
-      # 本番: reorder 両端 ON（server 側も on）。ラボは mogami-vm.nix で上書き。
-      # 1 端 off なら RAW に退避するため、部分適用も安全。
-      services.mqvpn.reorder = {
-        enabled = "on";
-        max_wait_ms = 100;
-        cap_packets = 4096;
+      services.mqvpn = {
+        interfaces = [
+          "enp1s0f0"
+          "enp1s0f1"
+          "enp1s0f2"
+          "enp1s0f3"
+          "enp6s0"
+          "enp8s0"
+          "enp9s0"
+        ];
+        auth = builtins.fromJSON (builtins.readFile ./mqvpn-auth.json);
+        clientPorts = [ 443 444 ];
+        lanInterface = "enp10s0";
+        hybrid = {
+          enabled = false;
+          tcp = "auto";
+          tcp_max_flows = 2048;
+        };
+        reorder = {
+          enabled = "on";
+          max_wait_ms = 100;
+          cap_packets = 4096;
+        };
       };
 
       # ---------------------------------------------------------------------

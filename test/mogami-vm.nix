@@ -97,7 +97,7 @@ in {
 
   # auth はシークレットのみ (server_addr は IP のみ、port は公開オプション clientPorts で指定)
   # サーバーはルーターから L2 隣接でなく、ホスト(ISP シム)経由の経路にある
-  services.mqvpn.auth = {
+  services.mqvpn.auth = lib.mkForce {
     server_addr = "10.200.99.2";
     auth_key = "mqvpn-test-key-2024";
   };
@@ -113,11 +113,11 @@ in {
 
   # mqvpn が実際にトンネルパスとして使う WAN は 3 本 (本番 3x Starlink 相当)。
   # NIC は 12 本残したまま、使うパスだけ絞る (残りは将来の拡張/監視用)。
-  services.mqvpn.interfaces = ["eth1" "eth3" "eth4"];
-  services.mqvpn.lanInterface = vmLanInterface;
+  services.mqvpn.interfaces = lib.mkForce [ "eth1" "eth3" "eth4" ];
+  services.mqvpn.lanInterface = lib.mkForce vmLanInterface;
 
   # クライアントは port リストで定義 (IP は auth.server_addr、WAN NIC は interfaces)
-  services.mqvpn.clientPorts = [ 443 444 ];
+  services.mqvpn.clientPorts = lib.mkForce [ 443 444 ];
 
   services.openssh.settings.PasswordAuthentication = lib.mkForce true;
 
