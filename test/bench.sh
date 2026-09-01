@@ -71,7 +71,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-HELLO_CMD="latency|hetero|collapse3|latab|uneven|measure|multistream|profile|stagger|wlbstate|clean"
+HELLO_CMD="latency|hetero|collapse3|collapse3_asym|latab|uneven|measure|multistream|profile|stagger|wlbstate|clean"
 [ $# -ge 1 ] || { echo "usage: $0 <$HELLO_CMD> [...]"; exit 1; }
 CMD="$1"; shift || true
 
@@ -275,6 +275,20 @@ apply_collapse3() {
   for i in "${!rtr_wan[@]}"; do
     w=${rtr_wan[$i]}
     cmd+="sudo -n tc qdisc replace dev $w root netem ${DELAY_SPEC[$w]} rate ${RATE_MEAN[$w]}mbit limit 100000;"
+  done
+  ssh_rtr "$cmd echo applied" 2>/dev/null
+}
+
+# collapse3_asym: 上り方向を実測容量 (eth1=36M, eth3=37M, eth4=20M) に絞ったモデル
+apply_collapse3_asym() {
+  DELAY_SPEC[eth1]="delay 12ms 3ms distribution normal"
+  DELAY_SPEC[eth3]="delay 11ms 4ms distribution normal"
+  DELAY_SPEC[eth4]="delay 12ms 6ms distribution pareto"
+  declare -A RATE_UP=( [eth1]=36 [eth3]=37 [eth4]=20 )
+  local cmd="" i w
+  for i in "${!rtr_wan[@]}"; do
+    w=${rtr_wan[$i]}
+    cmd+="sudo -n tc qdisc replace dev $w root netem ${DELAY_SPEC[$w]} rate ${RATE_UP[$w]}mbit limit 100000;"
   done
   ssh_rtr "$cmd echo applied" 2>/dev/null
 }
@@ -726,6 +740,17 @@ case "$CMD" in
     do_measure tcp 1 1200 down 15
     do_measure tcp 20 1200 down 15
     do_measure udp 20 1500 down 15
+    ;;
+  collapse3_asym)
+    clear_netem; apply_collapse3_asym; apply_collapse3_host; sleep 8
+    echo "=== [collapse3_asym] DOWNSTREAM TESTS (host netem: 217M/175M/107M, rtr netem: 36M/37M/20M) ==="
+    do_measure tcp 1 1200 down 15
+    do_measure tcp 20 1200 down 15
+    do_measure udp 20 1500 down 15
+    echo "=== [collapse3_asym] UPSTREAM TESTS ==="
+    do_measure tcp 1 1200 up 15
+    do_measure tcp 20 1200 up 15
+    do_measure udp 20 1500 up 15
     ;;
   latab)
     clear_netem; apply_latab; apply_latab_host; sleep 8
