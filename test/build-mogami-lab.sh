@@ -113,7 +113,7 @@ build_and_start() {
     --out-link /tmp/result-$link --print-build-logs
   ln -sf /tmp/result-$link "$SCRIPT_DIR/result-$link" 2>/dev/null || true
   echo "=== $attr build done; starting $suffix VM ==="
-  nohup "$SCRIPT_DIR/start-mogami-$suffix.sh" > "/tmp/mqvpn-$link.log" 2>&1 &
+  setsid "$SCRIPT_DIR/start-mogami-$suffix.sh" </dev/null > "/tmp/mqvpn-$link.log" 2>&1 &
   echo $! > "/tmp/mqvpn-$link.pid"
 }
 
