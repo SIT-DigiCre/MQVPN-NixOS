@@ -67,6 +67,11 @@ in
     description = "LAN-facing interface (kea DHCP / NAT / 起動待機の対象)";
   };
 
+  options.services.mqvpn.cc = lib.mkOption {
+    type = lib.types.enum [ "bbr" "bbr2" "cubic" "none" ];
+    description = "MQVPN congestion control algorithm (bbr, bbr2, cubic, none)";
+  };
+
   config =
     let
       mqvpnAuth = config.services.mqvpn.auth;
@@ -80,7 +85,7 @@ in
         reconnect = true;
         reconnect_interval = 5;
         scheduler = "wlb";
-        cc = "bbr";
+        cc = config.services.mqvpn.cc;
         reinjection = "deadline";
         reorder = config.services.mqvpn.reorder;
         manage_routes = false;
@@ -171,6 +176,7 @@ in
         ];
         auth = builtins.fromJSON (builtins.readFile ./mqvpn-auth.json);
         clientPorts = [ 443 444 445 ];
+        cc = "bbr";
         lanInterface = "enp10s0";
         hybrid = {
           enabled = false;
