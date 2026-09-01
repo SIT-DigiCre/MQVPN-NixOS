@@ -117,7 +117,7 @@ in {
   services.mqvpn.lanInterface = lib.mkForce vmLanInterface;
 
   # クライアントは port リストで定義 (IP は auth.server_addr、WAN NIC は interfaces)
-  services.mqvpn.clientPorts = lib.mkForce [ 443 444 ];
+  services.mqvpn.clientPorts = lib.mkForce [ 443 444 445 ];
 
   services.openssh.settings.PasswordAuthentication = lib.mkForce true;
 

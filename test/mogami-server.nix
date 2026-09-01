@@ -143,7 +143,7 @@ in
   networking.nat = {
     enable = true;
     externalInterface = "eth2";
-    internalInterfaces = [ "mqvpn0" "mqvpn1" ];
+    internalInterfaces = [ "mqvpn0" "mqvpn1" "mqvpn2" ];
   };
 
   virtualisation.docker.enable = true;
@@ -224,6 +224,7 @@ in
   networking.firewall.allowedUDPPorts = [
     443
     444
+    445
   ];
 
   boot.initrd.systemd.enable = false;

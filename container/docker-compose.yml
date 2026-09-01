@@ -69,6 +69,12 @@ services:
     environment:
       - MQVPN_INSTANCE_IDX=1
 
+  mqvpn-server-2:
+    <<: *mqvpn-server
+    container_name: mqvpn-server-2
+    environment:
+      - MQVPN_INSTANCE_IDX=2
+
   prometheus:
     image: mqvpn-prometheus:latest
     container_name: prometheus
