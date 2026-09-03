@@ -31,8 +31,8 @@ done
 
 echo "=== cleaning host forward/SNAT residue (mq-mgmt 関連ルール全消し) ==="
 # -o realif は実行のたびに変わり得るため、iptables-save の該当行を一括で -D する
-sudo sh -c 'iptables-save | grep -E "(POSTROUTING -s 192\.168\.50\.2 -o|FORWARD (-i mq-mgmt-br0|-o mq-mgmt-br0))" | sed "s/^-A/-D/" | xargs -r -n1 iptables -t filter' 2>/dev/null || true
-sudo sh -c 'iptables-save -t nat | grep "POSTROUTING -s 192\.168\.50\.2" | sed "s/^-A/-D/" | xargs -r -n1 iptables -t nat' 2>/dev/null || true
+sudo sh -c 'iptables-save -t filter | grep -E "FORWARD.*(mq-mgmt-br0|192\.168\.50\.2)" | sed "s/^-A/-D/" | xargs -r -L1 iptables -t filter' 2>/dev/null || true
+sudo sh -c 'iptables-save -t nat | grep -E "POSTROUTING.*192\.168\.50\.2" | sed "s/^-A/-D/" | xargs -r -L1 iptables -t nat' 2>/dev/null || true
 # グローバル ip_forward を起動前の値に戻す
 if [ -f /tmp/mqvpn-ipforward ]; then
   sudo sysctl -w net.ipv4.ip_forward="$(cat /tmp/mqvpn-ipforward)" >/dev/null 2>&1 || true
