@@ -68,7 +68,12 @@ in
   };
 
   options.services.mqvpn.cc = lib.mkOption {
-    type = lib.types.enum [ "bbr" "bbr2" "cubic" "none" ];
+    type = lib.types.enum [
+      "bbr"
+      "bbr2"
+      "cubic"
+      "none"
+    ];
     description = "MQVPN congestion control algorithm (bbr, bbr2, cubic, none)";
   };
 
@@ -175,7 +180,11 @@ in
           "enp9s0"
         ];
         auth = builtins.fromJSON (builtins.readFile ./mqvpn-auth.json);
-        clientPorts = [ 443 444 445 ];
+        clientPorts = [
+          443
+          444
+          445
+        ];
         cc = "bbr";
         lanInterface = "enp10s0";
         hybrid = {
@@ -298,6 +307,8 @@ in
         enable = true;
         settings = {
           server = {
+            prefetch = "yes";
+            serve-expired = "yes";
             interface = [ "0.0.0.0" ];
             access-control = [
               "127.0.0.0/8 allow"
