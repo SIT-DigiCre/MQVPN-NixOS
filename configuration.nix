@@ -202,6 +202,7 @@ in
       # ---------------------------------------------------------------------
       # 2. 基本設定
       # ---------------------------------------------------------------------
+      services.chrony.enable = true;
       networking.interfaces."${internalInterfaceName}" = {
         useDHCP = false;
         ipv4.addresses = [

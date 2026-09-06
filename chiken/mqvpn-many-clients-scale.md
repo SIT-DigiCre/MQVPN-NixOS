@@ -208,12 +208,28 @@ router 側 mqvpn client は TUN-ingress パケットの IPv4 src が自トンネ
 - lab 安定性注意: investigation 中に router VM が応答不能化 (policy routing 操作との時間相関あり。
   qemu 残存ハング・全 VM 消失も各1回)。dmesg/oomd/journal に痕跡なし。runtime の policy 実験は凍結。
   以降の検証は keeper 管理の正規 route のみで行うこと
-- `ip route get ... sport` sweep (read-only): 単発照会では dev＝src が常時一致。
-  しかし live では同一トンネルから別 src (.2.2 と .0.2 が共に mqvpn1 経由) が観測される。
-  すなわち照会経路と data path の src 選択が一致しない。厳密なカーネル内関数までは未特定
-  (member 選択と src 選択が別関数・別 seed の可能性が濃厚) が、運用上は MASQUERADE が
-  結果を確定させるため不問
-- unbound `outgoing-interface: 192.168.0.2` 強制＋spray: 33/45 (73%)。
-  src 固定でも ECMP が member を分散させるため約 1/3 の attempt のみ一致、再送で畳み込んで 73%。
-  match 確率モデルの直接裏付け。server conntrack で src 全件 .0.2 を確認 (bind 有効の証拠)
+- `ip route get ... sport` sweep と live の食い違いは §4.2 で解消済み
+  (fresh lookup は一致、CONNECTED socket の再利用＋keeper 書き換えでずれる)。
+  旧メモ (別関数・別 seed 説) は撤回
+- unbound `outgoing-interface` 強制実験は §4.2 の match 確率モデルの裏付けとして有効。
+  server conntrack で src 全件固定を確認
+- **router NTP 未稼働 → 原因特定・対応済み**: `systemd-timesyncd` unit 欠落の正体は
+  qemu-vm.nix:1491 の `services.timesyncd.enable = false`
+  ("Don't run ntpd in the guest. It should get the correct time from KVM")。
+  パッケージング欠落説は撤回。すなわち **lab 固有の正常動作**で、本番ベアメタルでは既定有効のはず
+  (自分の Dotfiles で設定不要なのはそのためで正常)。
+  なお `services.timesyncd.enable=true` の eval が true を返したのは vmVariant 適用前の評価のため。
+  `boot.isContainer=true` になるのは NixOS systemd-nspawn コンテナ (`containers.<name>`) のみ。
+  QEMU VM・Docker は対象外
+- 対策として `services.chrony.enable = true` を適用・lab 検証済み
+  (Stratum 3・offset 0.25ms・Leap Normal。tunnel＋MASQUERADE 経由で同期。
+  chrony モジュールが timesyncd を自前で mkForce false するため明示行は不要と確認し削除)。
+  QEMU RTC は起動時から 1.3秒進んでいた (host 時計由来)。無規律放置は DNSSEC 等の時限爆弾のため維持
+- server 側 `forward_inner_ip` の src 照合 (LOG_W) は lab 60分で 0 件。発火時は renumber 競合等の
+  目安になるため、DNS 障害時は `docker logs | grep "src IP mismatch"` を見ること
+- `get_reorder_stats` RPC は живых (lab で取得可。全カウンタ 0)。reorder drop は STATUS に出ないため、
+  監視に組み込むなら exporter 拡張か定期取得が必要
+- addr pool 枯渇: 不成立。MAX 254 に対し max_clients=64 で上限がかかり、destroy 時 release あり
+  (`mqvpn_server.c:811,1145`)。reconnect 競合の一時的 slot 消費のみ (.0.2→.0.3 進行はこのため)
+- Prometheus disk: 約26MB/15日 (95 series×3、30s scrape) のため問題なし
 - `status` の kea lease 数はファイル glob 頼み (best-effort)
