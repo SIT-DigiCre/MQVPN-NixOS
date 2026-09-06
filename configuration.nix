@@ -419,6 +419,7 @@ in
         }
         clientUnits
         # ルートキーパー:
+        #  駆動は netlink イベント (link/addr/route)＋60秒フェイルセーフ。3秒ポーリングは廃止。
         #  - サーバー制御プレーン経路のピン (manage_routes=false のため上流の setup_routes
         #    は動かない。WAN デフォルトが消えても <server>/32 を GW 経由で維持する)
         #  - ECMP デフォルトの再アサート (tun 再作成時はカーネルが ECMP ルートを全削除。
@@ -443,6 +444,7 @@ in
               iproute2
               gawk
               iptables
+              coreutils
               # fail-open / ピン用 GW の補完発見 (dhcpcd -U で現在リースを読む)
               dhcpcd
             ];
@@ -462,7 +464,9 @@ in
                 # 見えないため、復元用にループ間で保持 — 前回の記憶)
                 wan_nexthops=""
                 wan_restored=""
-                while true; do
+                # 1回の同期パス。起動時・netlink イベント時・60秒フェイルセーフ時に呼ぶ。
+                # 冪等な replace/del のみで構成 (何度呼んでも同じ状態に収束する)。
+                sync_once() {
                   # 1) WAN GW の発見 (可視デフォルト優先、無ければ dhcpcd リースで補完 —
                   #    GW 変更凍結の防止) + サーバーピン (/32 を nexthop 1 回で
                   #    replace。IF ごとに分けると最後の 1 本しか残らない)
@@ -537,8 +541,17 @@ in
                   #    規則と同値で無害。flush されても次ループで復旧する。
                   iptables -t nat -C nixos-nat-post -o "mqvpn+" -j MASQUERADE 2>/dev/null ||
                     iptables -t nat -A nixos-nat-post -o "mqvpn+" -j MASQUERADE 2>/dev/null || true
-                  sleep 3
-                done
+                }
+                sync_once
+                # フェイルセーフ: イベント取こぼし時のため60秒毎にも同期 (3秒ポーリングは廃止)
+                while true; do sleep 60; sync_once; done &
+                # netlink イベント駆動: TUN再作成・peer付与・カーネルのルート削除を検知し即時同期。
+                # バーストは1秒の debounce で吸収。monitor が死ねばスクリプト全体が終了し
+                # Restart=always で再起動する (その際 sync_once が走る)。
+                while IFS= read -r _ev; do
+                  while IFS= read -r -t 1 _ev2; do :; done
+                  sync_once
+                done < <(stdbuf -o0 -e0 ip monitor link addr route 2>/dev/null)
               '';
             };
           };

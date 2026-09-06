@@ -127,23 +127,28 @@ router 側 mqvpn client は TUN-ingress パケットの IPv4 src が自トンネ
 - STATUS の tcp_dropped/dgram_lost が 0 のままなのは、この drop がどのカウンタにも載らないため。
   cold-name 上流 tail との複合で SERVFAIL・timeout として観測される
 
-### 4.2 完全因果連鎖 (last mileまで特定)
+### 4.2 完全因果連鎖 (last mileまで特定。カーネル＋unbound両ソース読解済み)
 
-1. unbound は UDP を **CONNECTED socket** で出す (`ss` で `192.168.0.2:xxxxx → 1.1.1.1:53` を捕捉。
-   コード上 `outnet->udp_connect` 経由)。socket は pool で再利用される
-2. 新規 socket の connect 時は route 照会 (saddr=0) → ECMP member と src が一致した pair で確定。
-   `ip route get` が常に一致ペアを返すのはこのため (fresh lookup の世界)
-3. keeper が **3秒毎に ECMP route を replace** するため、cached dst が失効し、pool 再利用時に
-   再解決が走る。再解決では **saddr が保持されたまま** (`if (!fl4->saddr)` が偽のため再選択スキップ、
-   net/ipv4/fib_semantics.c:2243・route.c の data path) → ECMP 再ハッシュで別 member に落ちると
-   src≠member で **TUN ingress drop** (約 2/3)。これが観測の約2/3落下の正体
-4. 定量一致: 初回 (fresh socket) は一致するが、2回目以降の再利用が keeper 周期を跨ぐと lottery 化。
-   70並列×5逐次 (初回一致＋残り約60%) → 全体 ~63–68% ≒ 初回観測 62.9%。pin/単一では再解決先が
-   単一 member のため不整合が起きない (stale pool は idle 間に排水されることを `ss` の空振りで確認)
-5. MASQUERADE が bulletproof な理由: POSTROUTING で **毎パケット現 out-dev addr に書換え** のため、
-   socket の stale に関わらず常時一致。pin より強い (pin は pool 排水の過渡に依存)
-6. カーネル側の残り未特定分: keeper replace による dst 失効の厳密なタイミング
-   (rt_genid bump の標準 semantics として扱い、直接 trace は未実施)。運用判断への影響なし
+送信元IPの決まり方 (net/ipv4/{fib_semantics.c:2223,route.c:2894}、kernel 7.2):
+
+- fresh lookup (saddr=0): ECMP member をハッシュ選択 → `fib_result_prefsrc` で
+  **当該 member の dev addr** を返す (per-nexthop `nh_saddr`＋genid 管理)。`ip route get` が
+  常に一致ペアを返すのはこの世界。決定論的で矛盾なし
+- unbound は UDP を **CONNECTED socket** で出し (`ss` で `192.168.0.2:xxxxx → 1.1.1.1:53` を捕捉、
+  `outnet->udp_connect` 経由)、pool で再利用する。connect 時に上記で一致ペアが確定し socket＋dst に cache
+- keeper が **3秒毎に ECMP route を replace** するため cached dst が失効し、pool 再利用時に再解決が走る。
+  再解決では **saddr が保持されたまま** (`fib_select_path` の `if (!fl4->saddr)` が偽で再選択スキップ)。
+  ECMP 再ハッシュは保持 saddr を入力に含むため別 member に落ち得る → src≠member で **TUN ingress drop**
+- 定量一致: 初回 (fresh) は一致。 keeper 周期を跨いだ再利用が約 2/3 で不一致 →
+  70並列×5逐次で全体 ~63–68% ≒ 初回観測 62.9%。SERVFAIL (~1.7s で unbound が諦め) と
+  timeout (client 打切り) の内訳とも整合。churn 停止実験では SERVFAIL が消滅し timeout のみ残存
+  (不一致が消え slow tail のみが残ることの裏付け)
+- MASQUERADE が bulletproof な理由: POSTROUTING で **毎パケット現 out-dev addr に書換え** のため、
+  socket の新旧・keeper 周期・ECMP 分散の全てを吸収。pin は再解決先単一のため有効だが pool 過渡に依存
+- 残り未特定分: keeper replace による dst 失効の厳密なタイミング (rt_genid bump の標準 semantics
+  として扱い直接 trace 未実施)、unbound pool の排水タイミング (idle 後 `ss` 空振りで確認)。
+  運用判断への影響なし。なお keeper 冪等化 (変化時のみ書換え) は dst 失効自体を減らせる別解だが、
+  MASQUERADE で包含されるため見送り (記録のみ)
 
 ### 4.3 除外リスト (全て証拠付き)
 
