@@ -309,6 +309,7 @@ in
           server = {
             prefetch = "yes";
             serve-expired = "yes";
+            num-threads = 4;
             interface = [ "0.0.0.0" ];
             access-control = [
               "127.0.0.0/8 allow"
@@ -422,6 +423,14 @@ in
         #    は動かない。WAN デフォルトが消えても <server>/32 を GW 経由で維持する)
         #  - ECMP デフォルトの再アサート (tun 再作成時はカーネルが ECMP ルートを全削除。
         #    生存トンネルのみでアサートし、1 本でも生きていれば必ず張る)
+        #  - router-local → tunnel の SNAT 確保 (tun_validate_src 対策):
+        #    router 側 mqvpn は TUN-ingress の src≠自 tunnel IP を silent drop する。
+        #    LAN 側は NAT mark (0x1) で MASQUERADE され out-dev addr になるため常時一致
+        #    するが、router-local (unbound 上流等) は mark 無しで素通しされ、ECMP 下の
+        #    src 選択がトンネルと独立に分散 → 約2/3落下 (lab実証: spray 63–86%)。
+        #    `-o mqvpn+ MASQUERADE` で out-dev addr に確定させ常時一致させる。
+        #    LAN 側は既存 mark 規則と同値で無害。ECMP spray は維持 (pin 不要)。
+        #    chiken/mqvpn-many-clients-scale.md §4 参照
         #  - fail-open: 全トンネル死亡時は WAN デフォルトを復元
         {
           mqvpn-ecmp-assert = {
@@ -433,6 +442,7 @@ in
             path = with pkgs; [
               iproute2
               gawk
+              iptables
               # fail-open / ピン用 GW の補完発見 (dhcpcd -U で現在リースを読む)
               dhcpcd
             ];
@@ -521,6 +531,12 @@ in
                       fi
                     fi
                   fi
+                  # 3) router-local → tunnel の SNAT 確保 (tun_validate_src 対策)。
+                  #    -o mqvpn+ で MASQUERADE すると out-dev addr に確定し常時一致する
+                  #    (ECMP spray 維持、トンネル IP 変更にも追従)。LAN 側は既存 mark
+                  #    規則と同値で無害。flush されても次ループで復旧する。
+                  iptables -t nat -C nixos-nat-post -o "mqvpn+" -j MASQUERADE 2>/dev/null ||
+                    iptables -t nat -A nixos-nat-post -o "mqvpn+" -j MASQUERADE 2>/dev/null || true
                   sleep 3
                 done
               '';
