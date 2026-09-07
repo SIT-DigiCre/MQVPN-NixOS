@@ -51,7 +51,7 @@ sudo ./install-router.sh <インストール先のディスクのパス>
 
 ## 6. Configuration
 
-`configuration.nix` の `services.mqvpn` モジュールで設定する。
+`router/default.nix` の `services.mqvpn` で設定する。
 
 - `services.mqvpn.interfaces`: WAN を接続する可能性のある NIC 一覧。
 - `mqvpn-auth.json`（gitignore）: `server_addr` / `auth_key` を指定。
@@ -71,6 +71,6 @@ sudo ./install-router.sh <インストール先のディスクのパス>
 ## おまけ
 
 NICの一覧は`ip a`、ディスクの一覧は`lsblk -d`で出ます。
-configuration.nixの編集については、とりあえずインストーラを起動してからインストーラ環境で`ip a`をして、
+router/default.nixの編集については、とりあえずインストーラを起動してからインストーラ環境で`ip a`をして、
 NIC一覧を見てから手元で編集し、commitとpushをする という形で良いかもしれません。
 

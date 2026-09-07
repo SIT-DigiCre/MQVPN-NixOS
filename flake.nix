@@ -99,13 +99,13 @@
             ./disko.nix
             impermanence.nixosModules.impermanence
             ./persistence.nix
-            ./configuration.nix
+            ./router
           ] ++ commonModules;
         };
         mogami-vm = nixpkgs.lib.nixosSystem {
           system = "x86_64-linux";
           modules = [
-            ./configuration.nix
+            ./router
             ./test/mogami-vm.nix
           ] ++ commonModules;
         };
