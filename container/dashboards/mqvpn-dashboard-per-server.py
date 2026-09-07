@@ -5,7 +5,7 @@
 やること:
   1. ${DS_PROMETHEUS} プレースホルダを datasource uid (prometheus) に置換
   2. instance テンプレ変数を追加 (候補 = label_values(mqvpn_build_info,
-     instance)、初期値 = compose の全 mqvpn-server-* を選択状態。「All」
+     instance)、初期値 = 引数で渡した全サーバーを選択状態。「All」
      アイテムは持たない)
   3. 全 PROMQL に {instance=~"$instance"} を注入
      (既存の {user=...} には追記、素のメトリック名には後付け。
@@ -13,9 +13,9 @@
       直後が `)` の素メトリック (topk(5, metric) 等) も対象)
 
 Usage:
-  python3 mqvpn-dashboard-per-server.py BASE_JSON OUT_JSON [COMPOSE_YAML]
-  (COMPOSE_YAML: 既定選択とするサーバー一覧の取得元。無くても動くが、
-   初期選択が空になる)
+  python3 mqvpn-dashboard-per-server.py BASE_JSON OUT_JSON [SERVER ...]
+  (SERVER: 既定選択とするサービス名。prometheus の instance ラベルと一致
+   させること。無くても動くが、初期選択が空になる)
 """
 
 import json
@@ -40,12 +40,10 @@ d["refresh"] = "auto"
 # 状態は固定リストしか持てない。「All」アイテムは設けず、焼き込み時点の
 # 全サーバーを既定選択にする (増設時も prometheus targets と同じく再ビルドで
 # この初期リストが更新されるため、開いた瞬間に全サーバー表示になる)
-instances = []
-if len(sys.argv) >= 4:
-    compose_text = open(sys.argv[3]).read()
-    # instance ラベルは prometheus.yml でサービス名に固定しているため、
-    # 初期選択もサービス名にする (name:9091 ではない)
-    instances = re.findall(r"^\s+(mqvpn-server-[0-9]+):", compose_text, re.M)
+# 初期選択のサーバー名は argv で受ける (compose の自前パースはしない)。
+# instance ラベルは prometheus.yml でサービス名に固定しているため、
+# ここもサービス名にする (name:9091 ではない)
+instances = sys.argv[3:]
 d["templating"]["list"].append(
     {
         "name": "instance",

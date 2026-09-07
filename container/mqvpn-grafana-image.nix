@@ -9,13 +9,12 @@ let
   # NOTE: この nixpkgs の buildLayeredImage + fromImage は base config のうち
   # Env しか継承しない (Entrypoint/User/ExposedPorts 等は落ちる) ため、
   # 必要フィールドは明示する。値はピンした 12.4.9 の Dockerfile/config 由来。
-  grafanaBase = pkgs.dockerTools.pullImage {
+  grafanaBase = pkgs.callPackage ./docker-base.nix {
     imageName = "grafana/grafana";
     imageDigest = "sha256:9b58461280b4d2992d4399823c9427d0fcf5f0fd7f376c93f2dea876158b867b";
     finalImageName = "grafana/grafana";
     finalImageTag = "12.4.9";
     outputHash = "sha256-lymzqkW6FW4sDvy6IIKsKytfm97uGObEFXXlWrPF8eA=";
-    outputHashAlgo = "sha256";
   };
 
   mqvpnDashBase = pkgs.fetchurl {
@@ -36,7 +35,7 @@ let
   provisioning =
     pkgs.runCommand "mqvpn-grafana-provisioning"
       {
-        nativeBuildInputs = [ pkgs.python3 ];
+        nativeBuildInputs = [ pkgs.python3 pkgs.yq-go ];
       }
       ''
         mkdir -p $out/etc/grafana/provisioning/datasources \
@@ -44,9 +43,11 @@ let
                  $out/etc/grafana/dashboards
         cp ${./mon/datasource.yml} $out/etc/grafana/provisioning/datasources/datasource.yml
         cp ${./mon/dashboards.yml} $out/etc/grafana/provisioning/dashboards/dashboards.yml
+        # 初期選択のサーバー名は compose から yq で取る (手書きパースなし)。
+        # py 側は名前リストを argv で受ける。
+        mapfile -t svcs < <(yq --yaml-fix-merge-anchor-to-spec -r '.services | to_entries[] | select(.key | test("^mqvpn-server-[0-9]+$")) | .key' ${./docker-compose.yml})
         python3 ${./dashboards/mqvpn-dashboard-per-server.py} \
-          ${mqvpnDashBase} $out/etc/grafana/dashboards/mqvpn-grafana.json \
-          ${./docker-compose.yml}
+          ${mqvpnDashBase} $out/etc/grafana/dashboards/mqvpn-grafana.json "''${svcs[@]}"
       '';
 
   image = pkgs.dockerTools.buildLayeredImage {
