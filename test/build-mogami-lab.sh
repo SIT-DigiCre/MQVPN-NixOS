@@ -7,10 +7,13 @@ REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BRIDGE=mqvpn-br0
 TAP_ROUTER=tr-mq
 TAP_CLIENT=tc-mq
+WAN_TAPS=(trw{0..11})
+mkbridge() { sudo ip link add "$1" type bridge; sudo ip link set "$1" up; }
+mktap() { sudo ip tuntap add "$1" mode tap user "$USER"; sudo ip link set "$1" master "$2"; sudo ip link set "$1" up; }
 
 setup_network() {
   echo "=== cleanup stale interfaces ==="
-  for tap in trw0 trw1 trw2 trw3 trw4 trw5 trw6 trw7 trw8 trw9 trw10 trw11 ts-mgmt ts-mq tr-mgmt tc-mgmt tm-ext ts-ext tm-mgmt; do
+  for tap in "${WAN_TAPS[@]}" ts-mgmt ts-mq tr-mgmt tc-mgmt tm-ext ts-ext tm-mgmt; do
     sudo ip link delete "$tap" 2>/dev/null || true
   done
   sudo ip link delete mqvpn-srv-br0 2>/dev/null || true
@@ -22,18 +25,15 @@ setup_network() {
   sudo ip link delete $BRIDGE 2>/dev/null || true
 
   echo "=== creating WAN bridge: mqvpn-srv-br0 (per-WAN /24 GW = ISP シム) ==="
-  sudo ip link add mqvpn-srv-br0 type bridge
-  sudo ip link set mqvpn-srv-br0 up
-  for tap in trw0 trw1 trw2 trw3 trw4 trw5 trw6 trw7 trw8 trw9 trw10 trw11; do
-    sudo ip tuntap add "$tap" mode tap user "$USER"
-    sudo ip link set "$tap" master mqvpn-srv-br0
-    sudo ip link set "$tap" up
+  mkbridge mqvpn-srv-br0
+  for tap in "${WAN_TAPS[@]}"; do
+    mktap "$tap" mqvpn-srv-br0
     echo "  $tap -> mqvpn-srv-br0"
   done
   # 各 WAN 用ゲートウェイをホストが保持 (10.200.i.1/24)。ルーター WAN NIC は
   # 静的デフォルトルートでこの GW を経由し、サーバー(10.200.99.2)へ抜ける
   # → 本番の「WAN は ISP 経由でサーバーへ抜ける」と同形状 (DHCP は不要)。
-  for i in $(seq 0 11); do
+  for i in {0..11}; do
     sudo ip addr add "10.200.$i.1/24" dev mqvpn-srv-br0 2>/dev/null || true
   done
 
@@ -42,23 +42,16 @@ setup_network() {
   sudo ip link set mqvpn-srv2-br0 addr 02:00:00:50:00:03
   sudo ip addr add 10.200.99.1/24 dev mqvpn-srv2-br0 2>/dev/null || true
   sudo ip link set mqvpn-srv2-br0 up
-  sudo ip tuntap add ts-mq mode tap user "$USER"
-  sudo ip link set ts-mq master mqvpn-srv2-br0
-  sudo ip link set ts-mq up
+  mktap ts-mq mqvpn-srv2-br0
   echo "  ts-mq -> mqvpn-srv2-br0"
   # ルーター<->サーバー間転送を許可 (非NAT: サーバーが WAN 側実 IP をそのまま見る)
   sudo iptables -I FORWARD -i mqvpn-srv-br0 -o mqvpn-srv2-br0 -j ACCEPT 2>/dev/null || true
   sudo iptables -I FORWARD -i mqvpn-srv2-br0 -o mqvpn-srv-br0 -j ACCEPT 2>/dev/null || true
 
   echo "=== creating LAN bridge: $BRIDGE ==="
-  sudo ip link add $BRIDGE type bridge
-  sudo ip link set $BRIDGE up
-  sudo ip tuntap add $TAP_ROUTER mode tap user "$USER"
-  sudo ip link set $TAP_ROUTER master $BRIDGE
-  sudo ip link set $TAP_ROUTER up
-  sudo ip tuntap add $TAP_CLIENT mode tap user "$USER"
-  sudo ip link set $TAP_CLIENT master $BRIDGE
-  sudo ip link set $TAP_CLIENT up
+  mkbridge $BRIDGE
+  mktap $TAP_ROUTER $BRIDGE
+  mktap $TAP_CLIENT $BRIDGE
 
   echo "=== creating mgmt bridge: mq-mgmt-br0 (192.168.50.0/24) ==="
   sudo ip link add mq-mgmt-br0 type bridge
@@ -66,9 +59,7 @@ setup_network() {
   sudo ip addr add 192.168.50.254/24 dev mq-mgmt-br0 2>/dev/null || true
   sudo ip link set mq-mgmt-br0 up
   for tap in tr-mgmt ts-mgmt tc-mgmt tm-mgmt; do
-    sudo ip tuntap add "$tap" mode tap user "$USER"
-    sudo ip link set "$tap" master mq-mgmt-br0
-    sudo ip link set "$tap" up
+    mktap "$tap" mq-mgmt-br0
     echo "  $tap -> mq-mgmt-br0"
   done
   # サーバー (トンネル集約点) だけが上流へ抜けられる: forwarding + SNAT
@@ -96,9 +87,7 @@ setup_network() {
   sudo ip link set mq-ext-br0 addr 02:00:00:50:00:02
   sudo ip link set mq-ext-br0 up
   for tap in tm-ext ts-ext; do
-    sudo ip tuntap add "$tap" mode tap user "$USER"
-    sudo ip link set "$tap" master mq-ext-br0
-    sudo ip link set "$tap" up
+    mktap "$tap" mq-ext-br0
     echo "  $tap -> mq-ext-br0"
   done
 }
@@ -113,7 +102,7 @@ build_and_start() {
     --out-link /tmp/result-$link --print-build-logs
   ln -sf /tmp/result-$link "$SCRIPT_DIR/result-$link" 2>/dev/null || true
   echo "=== $attr build done; starting $suffix VM ==="
-  setsid "$SCRIPT_DIR/start-mogami-$suffix.sh" </dev/null > "/tmp/mqvpn-$link.log" 2>&1 &
+  setsid "$SCRIPT_DIR/start-vm.sh" "$suffix" </dev/null > "/tmp/mqvpn-$link.log" 2>&1 &
   echo $! > "/tmp/mqvpn-$link.pid"
 }
 
@@ -124,13 +113,14 @@ setup_network
 # 全 VM を並列ビルドし、各 VM は自分のビルドが終わった瞬間に起動。
 # server は docker 込みで一番重いので先頭に置き、他のビルド中に立ち上がる。
 echo "=== building + launching VMs in parallel ==="
-build_and_start server  mogami-server  server  & PID_server=$!
-build_and_start mogami  mogami-vm      router  & PID_mogami=$!
-build_and_start client  mogami-client  client  & PID_client=$!
-build_and_start mnet    mogami-mnet    mnet    & PID_mnet=$!
+pids=()
+for spec in "server:mogami-server:server" "mogami:mogami-vm:router" "client:mogami-client:client" "mnet:mogami-mnet:mnet"; do
+  IFS=: read -r link attr suffix <<<"$spec"
+  build_and_start "$link" "$attr" "$suffix" & pids+=($!)
+done
 
 fail=0
-for p in "$PID_server" "$PID_mogami" "$PID_client" "$PID_mnet"; do
+for p in "${pids[@]}"; do
   if ! wait "$p"; then echo "ERROR: a build job failed (pid $p)"; fail=1; fi
 done
 [ "$fail" -eq 0 ] || exit 1

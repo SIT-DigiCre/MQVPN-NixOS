@@ -61,12 +61,13 @@ ALIAS_BASE="172.31.250"   # Kea pool 末尾側。逐次割当では到達しな�
 MC_MAX=250
 
 # WAN NIC 一覧は flake が唯一の情報源 (bench.sh と同じ)
-rtr_wan=($(nix eval --json "path:$(cd "$SCRIPT_DIR/.." && pwd)#nixosConfigurations.mogami-vm.config.services.mqvpn.interfaces" 2>/dev/null | tr -d '[]"' | tr ',' ' ' || true))
+rtr_wan=($(nix eval --json "path:$(cd "$SCRIPT_DIR/.." && pwd)#nixosConfigurations.mogami-vm.config.services.mqvpn.interfaces" 2>/dev/null | nix shell nixpkgs#jq --command jq -r '.[]' 2>/dev/null || true))
 [ "${#rtr_wan[@]}" -gt 0 ] || { echo "ERROR: WAN NIC 一覧を flake から取得できない" >&2; exit 1; }
 
-rx_bytes() { # $1=iface (数値のみ返す)
-  ssh_rtr "ip -s link show $1 2>/dev/null | awk '/RX:/{getline;print \$1}'" 2>/dev/null | grep -E '^[0-9]+$' | tail -1
+iface_counter() { # $1=iface $2=RX|TX (数値のみ返す)
+  ssh_rtr "ip -s link show $1 2>/dev/null | awk '/$2:/{getline;print \$1}'" 2>/dev/null | grep -E '^[0-9]+$' | tail -1
 }
+rx_bytes() { iface_counter "$1" RX; }
 
 # トンネル確立待ち (起動直後の bulk 空振り防止。bench.sh の wait_wlb_steady の軽量版:
 # ECMP メンバー数＋peer 付与を見る。QUIC ハンドシェイク完了まで最大 120s)
@@ -80,42 +81,30 @@ wait_tunnels() {
   echo "WARN: tunnels not fully ready ($n). continue anyway" >&2
   return 0
 }
-tx_bytes() { # $1=iface (数値のみ返す。up 方向計測用)
-  ssh_rtr "ip -s link show $1 2>/dev/null | awk '/TX:/{getline;print \$1}'" 2>/dev/null | grep -E '^[0-9]+$' | tail -1
-}
+tx_bytes() { iface_counter "$1" TX; }
 
 # --- netem (bench.sh と同型。使う WAN は mqvpn の 3 本のみ) ---
 # 下りは server→router パケットがホスト WAN tap の egress を通るため、
 # router 側ではなくホスト側 tap (trw0-2 ↔ eth1,eth3,eth4) に掛ける。
 host_wan=(trw0 trw1 trw2)
-mc_netem_clear() {
-  ssh_rtr "for i in ${rtr_wan[*]}; do sudo -n tc qdisc del dev \$i root 2>/dev/null || true; done; echo netem-cleared" 2>/dev/null | tail -1
-  for t in "${host_wan[@]}"; do sudo -n tc qdisc del dev "$t" root 2>/dev/null || true; done
-  echo "netem-cleared-host"
-}
-mc_netem_uniform() { # $1=delay_ms (上下均一)
-  local ms="$1"
-  ssh_rtr "for i in ${rtr_wan[*]}; do sudo -n tc qdisc replace dev \$i root netem delay ${ms}ms limit 100000; done; echo applied" 2>/dev/null | tail -1
-  for t in "${host_wan[@]}"; do sudo -n tc qdisc replace dev "$t" root netem delay "${ms}ms" limit 100000; done
-  echo "applied-host (RTT ≈ +$((ms * 2))ms)"
-}
-mc_netem_hetero() { # 不均質 (Starlink系 45ms/12ms/loss1% ×3。bench.sh hetero の3本版)
-  ssh_rtr "for i in ${rtr_wan[*]}; do sudo -n tc qdisc replace dev \$i root netem delay 45ms 12ms loss 1% limit 100000; done; echo applied" 2>/dev/null | tail -1
-  for t in "${host_wan[@]}"; do sudo -n tc qdisc replace dev "$t" root netem delay 45ms 12ms loss 1% limit 100000; done
-  echo "applied-host"
-}
-mc_netem_asym() { # 非対称容量: up 35M / down 150M (delay 12ms)。bufferbloat 気味の実回線再現
-  ssh_rtr "for i in ${rtr_wan[*]}; do sudo -n tc qdisc replace dev \$i root netem delay 12ms rate 35mbit limit 100000; done; echo applied" 2>/dev/null | tail -1
-  for t in "${host_wan[@]}"; do sudo -n tc qdisc replace dev "$t" root netem delay 12ms rate 150mbit limit 100000; done
-  echo "applied-host (up=35M/down=150M per path)"
+mc_netem() { # $1=clear|hetero|asym|$ms
+  local spec="$1" rcmd hcmd
+  case "$spec" in
+    clear) ssh_rtr "for i in ${rtr_wan[*]}; do sudo -n tc qdisc del dev \$i root 2>/dev/null || true; done; echo netem-cleared" 2>/dev/null | tail -1
+      for t in "${host_wan[@]}"; do sudo -n tc qdisc del dev "$t" root 2>/dev/null || true; done; echo "netem-cleared-host"; return ;;
+    hetero) rcmd="delay 45ms 12ms loss 1% limit 100000"; hcmd="$rcmd" ;;
+    asym) rcmd="delay 12ms rate 35mbit limit 100000"; hcmd="delay 12ms rate 150mbit limit 100000" ;;
+    *) rcmd="delay ${spec}ms limit 100000"; hcmd="$rcmd" ;;
+  esac
+  ssh_rtr "for i in ${rtr_wan[*]}; do sudo -n tc qdisc replace dev \$i root netem $rcmd; done; echo applied" 2>/dev/null | tail -1
+  for t in "${host_wan[@]}"; do sudo -n tc qdisc replace dev "$t" root netem $hcmd; done
+  echo "applied-host${spec:+ ($spec)}"
 }
 do_netem() { # $1=ms|hetero|asym|clear
   case "${1:-}" in
-    clear) mc_netem_clear ;;
-    hetero) mc_netem_hetero ;;
-    asym) mc_netem_asym ;;
+    clear|hetero|asym) mc_netem "$1" ;;
     ''|*[!0-9]*) echo "usage: $0 netem <delay_ms|hetero|asym|clear>"; exit 1 ;;
-    *) mc_netem_uniform "$1" ;;
+    *) mc_netem "$1" ;;
   esac
   sleep 3 # WLB/TCP の過渡が落ち着くまで少し待つ (厳密な収束待ちは bench.sh wlbstate)
 }
@@ -136,7 +125,7 @@ ensure_iperfd_mnet() { # $1=N
 # 配送先は毎回一意化する (mix のように BG/FG 並走すると同名だと踏み合うため)。
 run_on_cli() { # $1=script $2...=args
   local script="$1"; shift
-  local f="/tmp/mc-run-$(date +%s%N)-$RANDOM.sh"
+  local f; f=$(mktemp /tmp/mc-run-XXXXXX.sh)
   printf '%s\n' "$script" | ssh_cli "cat > $f && chmod +x $f && $f $*; rm -f $f" 2>&1 | grep -vE 'fetching|Warning:' || true
 }
 

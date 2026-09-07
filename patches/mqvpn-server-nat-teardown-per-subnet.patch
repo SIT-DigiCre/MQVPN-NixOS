@@ -1,6 +1,6 @@
 --- a/scripts/mqvpn-server-nat.sh	2026-08-28 19:58:05.903335059 +0900
 +++ b/scripts/mqvpn-server-nat.sh	2026-08-28 19:59:11.649630721 +0900
-@@ -112,35 +112,44 @@
+@@ -112,35 +112,34 @@
  teardown() {
      echo "mqvpn-server-nat: teardown"
  
@@ -15,39 +15,39 @@
      # This handles any rule shape as long as it has our comment tag
      delete_by_comment() {
 -        local table="$1" chain="$2"
-+        local table="$1" chain="$2" subnet="$3"
++        local ipt="$1" table="$2" chain="$3" subnet="$4"
 +        [ -z "$subnet" ] && subnet="."
          while true; do
              local line
-             line=$(iptables -t "$table" -L "$chain" --line-numbers -n 2>/dev/null \
+-            line=$(iptables -t "$table" -L "$chain" --line-numbers -n 2>/dev/null \
 -                | grep "$COMMENT" | head -1 | awk '{print $1}')
++            line=$($ipt -t "$table" -L "$chain" --line-numbers -n 2>/dev/null \
 +                | grep "$COMMENT" | grep -F "$subnet" | head -1 | awk '{print $1}')
              [ -z "$line" ] && break
-             iptables -t "$table" -D "$chain" "$line" 2>/dev/null || break
+-            iptables -t "$table" -D "$chain" "$line" 2>/dev/null || break
++            $ipt -t "$table" -D "$chain" "$line" 2>/dev/null || break
          done
      }
  
 -    delete_by_comment nat POSTROUTING
 -    delete_by_comment filter FORWARD
-+    delete_by_comment nat POSTROUTING "$SUBNET"
-+    delete_by_comment filter FORWARD "$SUBNET"
++    delete_by_comment iptables nat POSTROUTING "$SUBNET"
++    delete_by_comment iptables filter FORWARD "$SUBNET"
  
      # Remove IPv6 FORWARD rules (unconditional — handles config changes between setup/teardown)
-     delete_by_comment_v6() {
+-    delete_by_comment_v6() {
 -        local table="$1" chain="$2"
-+        local table="$1" chain="$2" subnet="$3"
-+        [ -z "$subnet" ] && subnet="."
-         while true; do
-             local line
-             line=$(ip6tables -t "$table" -L "$chain" --line-numbers -n 2>/dev/null \
+-        while true; do
+-            local line
+-            line=$(ip6tables -t "$table" -L "$chain" --line-numbers -n 2>/dev/null \
 -                | grep "$COMMENT" | head -1 | awk '{print $1}')
-+                | grep "$COMMENT" | grep -F "$subnet" | head -1 | awk '{print $1}')
-             [ -z "$line" ] && break
-             ip6tables -t "$table" -D "$chain" "$line" 2>/dev/null || break
-         done
-     }
+-            [ -z "$line" ] && break
+-            ip6tables -t "$table" -D "$chain" "$line" 2>/dev/null || break
+-        done
+-    }
 -    delete_by_comment_v6 nat POSTROUTING
 -    delete_by_comment_v6 filter FORWARD
++    delete_by_comment_v6() { delete_by_comment ip6tables "$@"; }
 +    delete_by_comment_v6 nat POSTROUTING "$SUBNET6"
 +    delete_by_comment_v6 filter FORWARD "$SUBNET6"
  

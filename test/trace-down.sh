@@ -20,8 +20,8 @@ SRV_CTR=$("$SCRIPT_DIR/ssh-server.sh" 'sudo docker ps --filter name=mqvpn-server
 SRV_CTR="${SRV_CTR:-mqvpn-server-0}"
 
 # コンテナ内カウンタを 1 回の docker exec に集約して取得
-CARG_CMD='ip -s link show eth0 | sed -n 4p | awk "{print \"carg veth_rx=\" \$1}"
-ip -s link show mqvpn0 | sed -n 6p | awk "{print \"carg tun0_tx=\" \$1}"
+CARG_CMD='ip -s link show eth0 | awk "NR==4{print \"carg veth_rx=\" \$1}"
+ip -s link show mqvpn0 | awk "NR==6{print \"carg tun0_tx=\" \$1}"
 cat /proc/sys/net/netfilter/nf_conntrack_count | awk "{print \"carg ct=\" \$1}"
 awk "/^Udp:/{print}" /proc/net/snmp | tail -1 | awk "{print \"carg udp_in=\" \$2 \" noports=\" \$3 \" inerr=\" \$4}"'
 
@@ -29,10 +29,10 @@ awk "/^Udp:/{print}" /proc/net/snmp | tail -1 | awk "{print \"carg udp_in=\" \$2
 snap() {
   local out="$1"
   {
-    mnt 'set -e; N=$(awk "/^Udp:/{print}" /proc/net/snmp | tail -1); echo "mnet eth0_tx=$(ip -s link show eth0 | sed -n 6p | awk "{print $1}") udp_in=$(echo $N | awk "{print \$2}") noports=$(echo $N | awk "{print \$3}") inerr=$(echo $N | awk "{print \$4}") udp_out=$(echo $N | awk "{print \$5}")"'
-    srv 'echo "vm eth2_rx=$(ip -s link show eth2 | sed -n 4p | awk "{print $1}")"'
+    mnt 'set -e; N=$(awk "/^Udp:/{print}" /proc/net/snmp | tail -1); echo "mnet eth0_tx=$(ip -s link show eth0 | awk "NR==6{print \$1}") udp_in=$(echo $N | awk "{print \$2}") noports=$(echo $N | awk "{print \$3}") inerr=$(echo $N | awk "{print \$4}") udp_out=$(echo $N | awk "{print \$5}")"'
+    srv 'echo "vm eth2_rx=$(ip -s link show eth2 | awk "NR==4{print \$1}")"'
     srv "sudo docker exec $SRV_CTR sh -c '$CARG_CMD'"
-    rtr 'echo "rtr tun0_rx=$(ip -s link show mqvpn0 | sed -n 4p | awk "{print $1}") ct6205=$(grep -c 6205 /proc/net/nf_conntrack 2>/dev/null || echo 0)"; grep 6205 /proc/net/nf_conntrack 2>/dev/null | head -6'
+    rtr 'echo "rtr tun0_rx=$(ip -s link show mqvpn0 | awk "NR==4{print \$1}") ct6205=$(grep -c 6205 /proc/net/nf_conntrack 2>/dev/null || echo 0)"; grep 6205 /proc/net/nf_conntrack 2>/dev/null | head -6'
     cli 'set -e; N=$(awk "/^Udp:/{print}" /proc/net/snmp | tail -1); echo "cli udp_in=$(echo $N | awk "{print \$2}") inerr=$(echo $N | awk "{print \$4}") rbuferr=$(echo $N | awk "{print \$6}")"'
   } > "$out" 2>/dev/null
 }

@@ -33,7 +33,7 @@ in stdenv.mkDerivation {
   ];
 
   dontUseCmakeConfigure = true;
-  nativeBuildInputs = with pkgs; [ cmake makeWrapper autoPatchelfHook git ];
+  nativeBuildInputs = with pkgs; [ cmake autoPatchelfHook git ];
   buildInputs = with pkgs; [ libevent ];
 
   buildPhase = ''
@@ -51,6 +51,9 @@ in stdenv.mkDerivation {
     ln -sf libmqvpn.so.3 $out/lib/libmqvpn.so
   '';
 
+  # 上流 build.sh の産物は /build/ への RPATH を残すため、autoPatchelfHook
+  # だけでは forbidden reference が消えない。$out/lib へ明示付け替えが必須
+  # (削除するとビルドが RPATH エラーで落ちることを lab 再構築で確認)。
   preFixup = ''
     patchelf --set-rpath "$out/lib" $out/bin/mqvpn
     patchelf --set-rpath "$out/lib" $out/lib/libmqvpn.so.3

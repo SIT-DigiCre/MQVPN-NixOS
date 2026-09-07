@@ -1,43 +1,12 @@
-# 1 サーバ = 1 コンテナ。config は全インスタンスで同一ファイルをマウントする。
-# サーバー間の違いはポートフォワード + ENV のみ:
-#  - MQVPN_SUBNET: 仮想サブネットの上書き。同一ホストでクライアントインスタンス
-#    を複数立ち上げ (ECMP) する運用のみ。subnet の重複はカーネルが許容するため
-#    実用上問題ないが、ラボは曖昧さ回避のためサーバーごとに分けて運用。
-#    各サーバーが別クライアントを受ける通常運用では設定不要。tun_name は
-#    netns 分離により全インスタンス同一でよい
-#
-# サーバーは `network_mode: host` で動かす。コンテナがホストの netns を共有する
-# ため、hybrid=off 時の脱カプセル化トラフィックの次ホップが docker veth/bridge
-# (ソフトウェア) ではなく物理 NIC (TSO/GRO/マルチキュー/DMA) になり、OS フォワード
-# 経路が回線速度に迫る。hybrid=off は生成される server.conf に設定。
-# netns 分離が無くなるため各インスタンスは別の tun_name / listen / control_listen /
-# exporter / subnet が必要。これらは MQVPN_INSTANCE_IDX から自動決定される
-# (エントリポイントが導出: tun_name=mqvpn<idx>, listen=0.0.0.0:(443+idx),
-# control_listen=127.0.0.1:(9090+idx*2), exporter=(9091+idx*2),
-# subnet=192.168.<idx>.0/24)。明示的な MQVPN_* env があれば優先。
-# 注: network_mode: host ではコンテナのホスト名がホスト(VM)のものになり
-# コンテナ名が取れないため、idx は必ず MQVPN_INSTANCE_IDX で渡す (1行のみ)。
-#
-# 【サーバーの増やし方】mqvpn-server-2 を追加する:
-#   - 新サービスの `MQVPN_INSTANCE_IDX=2` を `<<: *mqvpn-server` で継承、
-#     container_name を変えるだけ (ポート等はエントリポイントが idx から自動導出)
-#   - prometheus の scrape target は nix ビルド時に compose から自動生成される
-#     ため (mqvpn-oci)、compose の編集だけで済む
-#   - Grafana は自動対応 (Server 変数が label_values で新インスタンスを拾う)
-#
-# メトリクス・監視 (prometheus / grafana も network_mode: host):
-#  - prometheus は 127.0.0.1:9091/9093 (exporter) を直接スクレイプする。
-#    ブリッジ経由しないためホストのファイアウォール (UFW 等) の INPUT 制限や
-#    ブリッジサブネット変動に影響されない。スケールアウト時も exporter が
-#    ホスト 127.0.0.1:9091+idx*2 で待つだけ (ファイアウォール変更不要)
-#  - prometheus の web ポートは 127.0.0.1:9000 (loopback 限定バインドで非公開。)
-#  - grafana は provisioning でデータソースとダッシュボードが自動登録される
-#    (http://<host>:3000, admin/…)。データソースは
-#    http://127.0.0.1:9000 (prometheus) を参照
-#  - 書込み先 (prometheus の TSDB / grafana.db) は named volume で永続化する。
-#    無名 volume だと --force-recreate や compose down のたびに履歴・設定が消える
-#  - Grafana の admin パスワードは平文 "admin" で渡し、初回ログイン時に変更する
-#    (ラボ/デモ用途。本番では初回ログインで必ず変更すること)
+# 1 サーバ = 1 コンテナ。config は全インスタンスで同一ファイルをマウントし、
+# 差分は MQVPN_INSTANCE_IDX のみ (残りはエントリポイントが自動導出:
+# tun=mqvpn<idx>, listen=0.0.0.0:(443+idx), control=127.0.0.1:(9090+idx*2),
+# exporter=(9091+idx*2), subnet=192.168.<idx>.0/24)。
+# network_mode: host のため idx は必須 (コンテナ名から取れない)。
+# 増やし方: 下の server ブロックを複写し IDX を変えるだけ
+# (prometheus targets は nix ビルド時に自動生成、Grafana は自動追従)。
+# 監視: prometheus=127.0.0.1:9000 / grafana=:3000(admin/admin、初回変更)。
+# TSDB/grafana.db は named volume 永続化。
 
 x-mqvpn-server: &mqvpn-server
   image: mqvpn-server:latest

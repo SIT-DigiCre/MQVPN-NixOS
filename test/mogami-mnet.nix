@@ -8,6 +8,8 @@
 # クライアント→トンネル→コンテナ NAT→server VM eth2→ここ、の
 # フルチェーンを漏れなく測定できる。
 {
+  imports = [ ./test-base.nix ];
+
   networking.hostName = lib.mkForce "mogami-mnet";
 
   networking.useDHCP = false;
@@ -50,8 +52,6 @@
     password = "mnet";
   };
 
-  security.sudo.wheelNeedsPassword = false;
-
   networking.firewall.allowedTCPPorts = [
     22
     6205
@@ -71,13 +71,9 @@
   ];
   boot.initrd.systemd.enable = false;
 
-  system.stateVersion = "26.05";
-
   environment.systemPackages = with pkgs; [ iperf3 ];
 
   virtualisation.vmVariant = {
-    virtualisation.graphics = false;
-    virtualisation.qemu.options = [ ];
     virtualisation.qemu.networkingOptions = lib.mkForce [
       "-nic tap,ifname=tm-ext,script=no,downscript=no,model=virtio-net-pci,mac=52:54:00:12:34:61"
       "-nic tap,ifname=tm-mgmt,script=no,downscript=no,model=virtio-net-pci,mac=52:54:00:12:34:62"

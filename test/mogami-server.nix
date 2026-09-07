@@ -79,6 +79,8 @@ let
   '';
 in
 {
+  imports = [ ./test-base.nix ];
+
   networking.hostName = lib.mkForce "mogami-server";
   # VM ビルダーが net.ifnames=0 を kernel param に足すため interface 名は常に ethX
 
@@ -188,8 +190,6 @@ in
   };
 
   virtualisation.vmVariant = {
-    virtualisation.graphics = false;
-    virtualisation.qemu.options = [ ];
     virtualisation.qemu.networkingOptions = lib.mkForce [
       "-nic tap,ifname=ts-mgmt,script=no,downscript=no,model=virtio-net-pci,mac=52:54:00:12:34:58"
       "-nic tap,ifname=ts-mq,script=no,downscript=no,model=virtio-net-pci,mac=52:54:00:12:34:59"
@@ -215,8 +215,6 @@ in
     password = "server";
   };
 
-  security.sudo.wheelNeedsPassword = false;
-
   networking.firewall.allowedTCPPorts = [
     22 # SSH
     3000 # grafana (browser アクセス用)
@@ -228,8 +226,6 @@ in
   ];
 
   boot.initrd.systemd.enable = false;
-
-  system.stateVersion = "26.05";
 
   environment.systemPackages = with pkgs; [
     iperf3

@@ -162,7 +162,7 @@ CORESAMP
 # --- netem ---
 # WAN NIC 一覧の唯一の情報源は mogami-vm の services.mqvpn.interfaces
 # (= test/mogami-vm.nix の vmWanInterfaces)。flake から導出して同期ずれを防ぐ。
-rtr_wan=($(nix eval --json "path:$(cd "$SCRIPT_DIR/.." && pwd)#nixosConfigurations.mogami-vm.config.services.mqvpn.interfaces" 2>/dev/null | tr -d '[]"' | tr ',' ' ' || true))
+rtr_wan=($(nix eval --json "path:$(cd "$SCRIPT_DIR/.." && pwd)#nixosConfigurations.mogami-vm.config.services.mqvpn.interfaces" 2>/dev/null | nix shell nixpkgs#jq --command jq -r '.[]' 2>/dev/null || true))
 [ "${#rtr_wan[@]}" -gt 0 ] || { echo "ERROR: WAN NIC 一覧を flake から取得できない" >&2; exit 1; }
 
 clear_netem() {
@@ -184,141 +184,31 @@ declare -A DELAY_SPEC=( [eth1]="delay 12ms 3ms distribution normal" [eth3]="dela
 clear_netem_host() {
   for t in "${host_wan[@]}"; do sudo -n tc qdisc del dev "$t" root 2>/dev/null || true; done; echo netem-cleared-host
 }
-apply_uniform_host() {
-  local ms="$1"
-  for t in "${host_wan[@]}"; do sudo -n tc qdisc replace dev "$t" root netem delay ${ms}ms limit 100000; done; echo applied-host
-}
-apply_hetero_host() {
-  local p
-  for i in "${!host_wan[@]}"; do
-    if [ "$i" -lt 5 ]; then p="delay 45ms 12ms loss 1%"
-    elif [ "$i" -lt 10 ]; then p="delay 75ms 25ms loss 0.5%"
-    else p="delay 15ms 4ms loss 0.2%"
-    fi
-    sudo -n tc qdisc replace dev "${host_wan[$i]}" root netem $p limit 100000
-  done; echo applied-host
-}
-apply_collapse3_host() {
-  # 実測物理容量/RTT。下り 217/175/107M(平均), RTT 平均 24.8/22.5/23.1ms→片道≈/2 で変動。
-  # C(Mini) のみ最大 40.9ms のジッター(pareto)。netem は対称なので下り容量でモデル。
-  # DELAY_SPEC/RATE_MEAN は collapse3 側で設定済(本関数は host 側 egress に同じを適用)。
-  local i w
-  for i in "${!host_wan[@]}"; do
-    w=${rtr_wan[$i]}
-    sudo -n tc qdisc replace dev "${host_wan[$i]}" root netem ${DELAY_SPEC[$w]} rate ${RATE_MEAN[$w]}mbit limit 100000
-  done; echo applied-host
-}
-
-# latab: 容量は collapse3 と同一(実測 217/175/107M)、RTT だけ広げる。
-# 容量を固定し RTT のみ変化させることで、pin ポリシーの違い(純容量 vs RTTダンプ)
-# を孤立計測する (latab シナリオ用)。
-apply_latab_host() {
-  # 容量は collapse3 と同一(実測 217/175/107M, 固定平均値)。RTT は latab 用に拡大(下を参照)。
-  local i w
-  for i in "${!host_wan[@]}"; do
-    w=${rtr_wan[$i]}
-    sudo -n tc qdisc replace dev "${host_wan[$i]}" root netem ${DELAY_SPEC[$w]} rate ${RATE_MEAN[$w]}mbit limit 100000
-  done; echo applied-host
-}
-
-# 帯域不均一 + RTT 不均一 (本番の「回線ごとに容量が違う」ケース)。
-# 意図的に「RTT が大きい回線ほど太い」: eth1=200M/10ms, eth3=600M/200ms,
-# eth4=300M/50ms。RTTダンプ系ポリシーだと太い eth3 を捨てるため、
-# 容量ベースポリシーとの差が最も出る (uneven シナリオ用)。
-apply_uneven_host() {
-  local specs=("delay 10ms rate 200mbit" "delay 200ms rate 600mbit" "delay 50ms rate 300mbit")
-  for i in "${!host_wan[@]}"; do
-    sudo -n tc qdisc replace dev "${host_wan[$i]}" root netem ${specs[$i]} limit 100000
-  done; echo applied-host
-}
-
-apply_uniform() {
-  local ms="$1"
-  ssh_rtr "for i in ${rtr_wan[*]}; do
-    sudo -n tc qdisc replace dev \$i root netem delay ${ms}ms limit 100000
-  done; echo applied" 2>/dev/null
-}
-
-# 不均質 netem: 実環境の分類比 (Starlink3 : モバイル3 : eduroam1) を 12 パス向けに
-# 拡大した比 (Starlink5 : モバイル5 : eduroam2)。リスト先頭から順に割り当てる。
-apply_hetero() {
-  local cmd="" i p
-  for i in "${!rtr_wan[@]}"; do
-    if [ "$i" -lt 5 ]; then
-      p="delay 45ms 12ms loss 1%"
-    elif [ "$i" -lt 10 ]; then
-      p="delay 75ms 25ms loss 0.5%"
-    else
-      p="delay 15ms 4ms loss 0.2%"
-    fi
-    cmd+="sudo -n tc qdisc replace dev ${rtr_wan[$i]} root netem $p limit 100000;"
-  done
+# 12種のapply_*を1表に統一。router+host両方に同specを適用する。
+# collapse3_asymのみ非対称: router=上り36/37/20M, host=下り217/175/107M (従来通り)。
+apply_netem() { # $1=uniform|hetero|collapse3|collapse3_asym|latab|uneven [$2=ms]
+  local profile="$1" ms="${2:-}" i w
+  local -a specs=() hspecs=()
+  case "$profile" in
+    uniform) for w in "${rtr_wan[@]}"; do specs+=("delay ${ms}ms limit 100000"); done ;;
+    hetero) for i in "${!rtr_wan[@]}"; do if [ "$i" -lt 5 ]; then specs+=("delay 45ms 12ms loss 1% limit 100000"); elif [ "$i" -lt 10 ]; then specs+=("delay 75ms 25ms loss 0.5% limit 100000"); else specs+=("delay 15ms 4ms loss 0.2% limit 100000"); fi; done ;;
+    collapse3)
+      DELAY_SPEC[eth1]="delay 12ms 3ms distribution normal"; DELAY_SPEC[eth3]="delay 11ms 4ms distribution normal"; DELAY_SPEC[eth4]="delay 12ms 6ms distribution pareto"
+      for w in "${rtr_wan[@]}"; do specs+=("${DELAY_SPEC[$w]} rate ${RATE_MEAN[$w]}mbit limit 100000"); done ;;
+    collapse3_asym)
+      DELAY_SPEC[eth1]="delay 12ms 3ms distribution normal"; DELAY_SPEC[eth3]="delay 11ms 4ms distribution normal"; DELAY_SPEC[eth4]="delay 12ms 6ms distribution pareto"
+      declare -A RATE_UP=( [eth1]=36 [eth3]=37 [eth4]=20 )
+      for w in "${rtr_wan[@]}"; do specs+=("${DELAY_SPEC[$w]} rate ${RATE_UP[$w]}mbit limit 100000"); hspecs+=("${DELAY_SPEC[$w]} rate ${RATE_MEAN[$w]}mbit limit 100000"); done ;;
+    latab)
+      DELAY_SPEC[eth1]="delay 10ms"; DELAY_SPEC[eth3]="delay 200ms"; DELAY_SPEC[eth4]="delay 50ms"
+      for w in "${rtr_wan[@]}"; do specs+=("${DELAY_SPEC[$w]} rate ${RATE_MEAN[$w]}mbit limit 100000"); done ;;
+    uneven) specs=("delay 10ms rate 200mbit limit 100000" "delay 200ms rate 600mbit limit 100000" "delay 50ms rate 300mbit limit 100000") ;;
+  esac
+  [ "${#hspecs[@]}" -eq 0 ] && hspecs=("${specs[@]}")
+  local cmd=""
+  for i in "${!rtr_wan[@]}"; do cmd+="sudo -n tc qdisc replace dev ${rtr_wan[$i]} root netem ${specs[$i]};"; done
   ssh_rtr "$cmd echo applied" 2>/dev/null
-}
-
-# 本番 3x Starlink の実測物理回線 (selection-vs-delivered.md 2026-08-28 強制出口 n=5
-# 平均下り + real-env.md §3.1 直結 ping RTT)。WAN 3 本と一致。
-# 下り容量: A(eth1,Flat)=217M / B(eth3,Move)=175M / C(eth4,Mini)=107M (合計≈499M)。
-# RTT(router→VPS 直結): A=24.8 B=22.5 C=23.1ms(平均)、C のみ最大 40.9ms のジッター。
-# netem delay は片道なので測定 RTT/2 を指定 (ラボ ping RTT≈実測)。上りは 36/37/20M だが
-# netem は対称のため下り容量でモデル (ACK 少数のため下り律速にならず)。
-# 実 RTT 差は小さいため再設計スケジューラは容量比例配分となり、1 パス崩壊は再現しない
-# (本番 real-env.md「崩壊なし」と整合)。崩壊を見たいなら latab/uneven で RTT 差を拡大。
-apply_collapse3() {
-  # 実測物理容量/RTT: 下り 217/175/107M(平均), RTT 平均 24.8/22.5/23.1ms を片道≈/2 で
-  # 変動付き(min/max は選択/配分に影響)。C(Mini) のみジッター tail 大(pareto, 最大 40.9ms)。
-  # 容量 rate は固定平均値(217/175/107M)。RTT は実測 min/max を jitter で変動。
-  DELAY_SPEC[eth1]="delay 12ms 3ms distribution normal"
-  DELAY_SPEC[eth3]="delay 11ms 4ms distribution normal"
-  DELAY_SPEC[eth4]="delay 12ms 6ms distribution pareto"
-  local cmd="" i w
-  for i in "${!rtr_wan[@]}"; do
-    w=${rtr_wan[$i]}
-    cmd+="sudo -n tc qdisc replace dev $w root netem ${DELAY_SPEC[$w]} rate ${RATE_MEAN[$w]}mbit limit 100000;"
-  done
-  ssh_rtr "$cmd echo applied" 2>/dev/null
-}
-
-# collapse3_asym: 上り方向を実測容量 (eth1=36M, eth3=37M, eth4=20M) に絞ったモデル
-apply_collapse3_asym() {
-  DELAY_SPEC[eth1]="delay 12ms 3ms distribution normal"
-  DELAY_SPEC[eth3]="delay 11ms 4ms distribution normal"
-  DELAY_SPEC[eth4]="delay 12ms 6ms distribution pareto"
-  declare -A RATE_UP=( [eth1]=36 [eth3]=37 [eth4]=20 )
-  local cmd="" i w
-  for i in "${!rtr_wan[@]}"; do
-    w=${rtr_wan[$i]}
-    cmd+="sudo -n tc qdisc replace dev $w root netem ${DELAY_SPEC[$w]} rate ${RATE_UP[$w]}mbit limit 100000;"
-  done
-  ssh_rtr "$cmd echo applied" 2>/dev/null
-}
-
-# latab: 容量同一・RTT のみ広げた不均質 (collapse3 の容量 217/175/107M を維持し、
-# RTT 差を意図的に拡大)。idx0 = eth1: 10ms/217M  idx1 = eth3: 200ms/175M  idx2 = eth4: 50ms/107M
-apply_latab() {
-  # 容量は collapse3 と同一(実測 217/175/107M, 固定平均値)。RTT のみ拡大して pin ポリシーを孤立計測。
-  DELAY_SPEC[eth1]="delay 10ms"; DELAY_SPEC[eth3]="delay 200ms"; DELAY_SPEC[eth4]="delay 50ms"
-  local cmd="" i w
-  for i in "${!rtr_wan[@]}"; do
-    w=${rtr_wan[$i]}
-    cmd+="sudo -n tc qdisc replace dev $w root netem ${DELAY_SPEC[$w]} rate ${RATE_MEAN[$w]}mbit limit 100000;"
-  done
-  ssh_rtr "$cmd echo applied" 2>/dev/null
-}
-
-# uneven: 帯域不均一 + RTT 不均一。遅い回線ほど太い:
-# idx0 = eth1: 10ms/200M   idx1 = eth3: 200ms/600M   idx2 = eth4: 50ms/300M
-apply_uneven() {
-  local specs=(
-    "delay 10ms rate 200mbit"
-    "delay 200ms rate 600mbit"
-    "delay 50ms rate 300mbit"
-  )
-  local cmd="" i
-  for i in "${!rtr_wan[@]}"; do
-    cmd+="sudo -n tc qdisc replace dev ${rtr_wan[$i]} root netem ${specs[$i]} limit 100000;"
-  done
-  ssh_rtr "$cmd echo applied" 2>/dev/null
+  for i in "${!host_wan[@]}"; do sudo -n tc qdisc replace dev "${host_wan[$i]}" root netem ${hspecs[$i]}; done; echo applied-host
 }
 
 # === iperf3 ===
@@ -376,6 +266,14 @@ ensure_iperfd_mnet() {
 # 各 WAN の rx バイト数を取得 (ssh ラッパの "fetching/Warning" 行を数値のみに絞る)
 rx_bytes() { # $1=iface
   ssh_rtr "ip -s link show $1 2>/dev/null | awk '/RX:/{getline;print \$1}'" 2>/dev/null | grep -E '^[0-9]+$' | tail -1
+}
+measure_preamble() { ensure_iperfd_mnet; ensure_rmem; ensure_wmem_mnet; ship_common; }
+fetch_ceil() { # $1=assoc名: 各WANのnetem ceilingをtcから取得
+  local -n _C=$1; local w c
+  for w in "${rtr_wan[@]}"; do
+    c=$(ssh_rtr "tc qdisc show dev $w 2>/dev/null | grep -o 'rate [0-9]*Mbit' | grep -o '[0-9]*' || true" 2>/dev/null | tail -1)
+    _C[$w]=${c:-0}
+  done
 }
 
 # -----------------------------------------------------------------------------
@@ -488,14 +386,10 @@ measure_once() {
   [ "$warmup_max" -lt "$warmup" ] && warmup_max=$(( warmup + 30 ))
   [ "$dir" = "down" ] && flag="-R"
   [ "$proto" = "udp" ] && uflag="-u"
-  ensure_iperfd_mnet; ensure_rmem; ensure_wmem_mnet; ship_common
+  measure_preamble
 
   # 各 WAN の netem ceiling (Mbit) を tc から動的取得
-  declare -A CEIL
-  for w in "${rtr_wan[@]}"; do
-    local c; c=$(ssh_rtr "tc qdisc show dev $w 2>/dev/null | grep -o 'rate [0-9]*Mbit' | grep -o '[0-9]*' || true" 2>/dev/null | tail -1)
-    CEIL[$w]=${c:-0}
-  done
+  declare -A CEIL; fetch_ceil CEIL
 
   # 負荷を流しつつ定常窓を計測。単一フロー(P=1)ではウォームアップ中に TCP コネクションが
   # リセットされると計測窓が 0 になる(フレーク)。TOTAL=0 の場合は再計測する。
@@ -589,13 +483,9 @@ do_stagger() {
   local flag="" uflag="" win=$(( gap * (N - 1) + sec ))
   [ "$dir" = "down" ] && flag="-R"
   [ "$proto" = "udp" ] && uflag="-u"
-  ensure_iperfd_mnet; ensure_rmem; ensure_wmem_mnet; ship_common
+  measure_preamble
 
-  declare -A CEIL
-  for w in "${rtr_wan[@]}"; do
-    local c; c=$(ssh_rtr "tc qdisc show dev $w 2>/dev/null | grep -o 'rate [0-9]*Mbit' | grep -o '[0-9]*' || true" 2>/dev/null | tail -1)
-    CEIL[$w]=${c:-0}
-  done
+  declare -A CEIL; fetch_ceil CEIL
   declare -A B0
   for w in "${rtr_wan[@]}"; do B0[$w]=$(rx_bytes "$w"); done
 
@@ -640,12 +530,8 @@ do_latab() {
     local warmup_max="${BENCH_WARMUP_MAX:-45}"
   [ "$warmup_max" -lt "$warmup" ] && warmup_max=$(( warmup + 30 ))
   local wp=$(( warmup_max + sec + 5 ))
-  ensure_iperfd_mnet; ensure_rmem; ensure_wmem_mnet; ship_common
-  declare -A CEIL
-  for w in "${rtr_wan[@]}"; do
-    local c; c=$(ssh_rtr "tc qdisc show dev $w 2>/dev/null | grep -o 'rate [0-9]*Mbit' | grep -o '[0-9]*' || true" 2>/dev/null | tail -1)
-    CEIL[$w]=${c:-0}
-  done
+  measure_preamble
+  declare -A CEIL; fetch_ceil CEIL
 
   samp_start "$((wp + 4))"
   ssh_cli "iperf3 -c $TARGET -p $PORT -R -P 20 -b 1200M -t $wp > /tmp/fill.txt 2>&1" &
@@ -716,8 +602,6 @@ ensure_wmem_mnet() {
 }
 
 # =============================================================================
-CMDRUN="latency|hetero|collapse3|latab|uneven|measure|multistream|profile|stagger|clean"
-
 case "$CMD" in
   clean)
     clear_netem
@@ -727,22 +611,22 @@ case "$CMD" in
     ;;
   latency)
     MS="${1:-50}"; RATE="${2:-800}"; SEC="${3:-15}"; DIR="${4:-down}"
-    clear_netem; apply_uniform "$MS"; apply_uniform_host "$MS"; sleep 8
+    clear_netem; apply_netem uniform "$MS"; sleep 8
     do_measure tcp 20 "$RATE" "$DIR" "$SEC"
     ;;
   hetero)
     RATE="${1:-800}"; SEC="${2:-15}"; DIR="${3:-down}"
-    clear_netem; apply_hetero; apply_hetero_host; sleep 8
+    clear_netem; apply_netem hetero; sleep 8
     do_measure tcp 20 "$RATE" "$DIR" "$SEC"
     ;;
   collapse3)
-    clear_netem; apply_collapse3; apply_collapse3_host; sleep 8
+    clear_netem; apply_netem collapse3; sleep 8
     do_measure tcp 1 1200 down 15
     do_measure tcp 20 1200 down 15
     do_measure udp 20 1500 down 15
     ;;
   collapse3_asym)
-    clear_netem; apply_collapse3_asym; apply_collapse3_host; sleep 8
+    clear_netem; apply_netem collapse3_asym; sleep 8
     echo "=== [collapse3_asym] DOWNSTREAM TESTS (host netem: 217M/175M/107M, rtr netem: 36M/37M/20M) ==="
     do_measure tcp 1 1200 down 15
     do_measure tcp 20 1200 down 15
@@ -753,11 +637,11 @@ case "$CMD" in
     do_measure udp 20 1500 up 15
     ;;
   latab)
-    clear_netem; apply_latab; apply_latab_host; sleep 8
+    clear_netem; apply_netem latab; sleep 8
     do_latab "${1:-15}" "latab (cap=collapse3 実測 217/175/107M; RTT eth1=10ms eth3=200ms eth4=50ms)"
     ;;
   uneven)
-    clear_netem; apply_uneven; apply_uneven_host; sleep 8
+    clear_netem; apply_netem uneven; sleep 8
     do_latab "${1:-15}" "uneven (eth1=10ms/200M eth3=200ms/600M eth4=50ms/300M)"
     ;;
   measure)
@@ -771,7 +655,7 @@ case "$CMD" in
     ;;
   profile)
     MS="${1:-50}"; RATE="${2:-800}"; SEC="${3:-15}"; DIR="${4:-down}"
-    ensure_iperfd_mnet; ensure_rmem; ensure_wmem_mnet; ship_common; clear_netem; apply_uniform "$MS"; apply_uniform_host "$MS"
+    ensure_iperfd_mnet; ensure_rmem; ensure_wmem_mnet; ship_common; clear_netem; apply_netem uniform "$MS"
     sleep 8
     PERF=$(ssh_srv "command -v perf 2>/dev/null | tail -1")
     [ -n "$PERF" ] || { echo "perf not found on server"; exit 1; }
@@ -812,6 +696,6 @@ wlbstate)
     fi
     ;;
   *)
-    echo "unknown: $CMD (use: $CMDRUN)"; exit 1;
+    echo "unknown: $CMD (use: $HELLO_CMD)"; exit 1;
     ;;
 esac

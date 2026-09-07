@@ -1,7 +1,7 @@
 {
   disko.devices = {
     disk = {
-      "main" = {
+      main = {
         type = "disk";
         # diskoによって自動で(与えた引数に)置き換えられるので変更しなくて問題ない
         device = "/dev/changeme";
@@ -35,23 +35,17 @@
                   "-L"
                   "nixos_root"
                 ];
-                subvolumes = {
+                subvolumes = let btrfsOpts = [ "compress-force=zstd" "noatime" ]; in {
                   "root" = {
                     mountpoint = "/";
                   };
                   "nix" = {
                     mountpoint = "/nix";
-                    mountOptions = [
-                      "compress-force=zstd"
-                      "noatime"
-                    ];
+                    mountOptions = btrfsOpts;
                   };
                   "persist" = {
                     mountpoint = "/persist";
-                    mountOptions = [
-                      "compress-force=zstd"
-                      "noatime"
-                    ];
+                    mountOptions = btrfsOpts;
                   };
                 };
               };

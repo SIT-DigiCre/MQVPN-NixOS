@@ -38,6 +38,8 @@
     { tap = "trw11";   mac = "52:54:00:12:34:68"; }
   ];
 in {
+  imports = [ ./test-base.nix ];
+
   networking.hostName = lib.mkForce "mogami-vm";
 
   networking.useDHCP = false;
@@ -104,10 +106,6 @@ in {
 
   services.qemuGuest.enable = true;
 
-  virtualisation.vmVariant = {
-    virtualisation.graphics = false;
-    virtualisation.qemu.options = [];
-  };
   hardware.enableRedistributableFirmware = lib.mkForce false;
   hardware.firmware = lib.mkForce [];
 

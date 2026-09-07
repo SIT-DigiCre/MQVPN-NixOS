@@ -39,17 +39,8 @@ let
 
   # 1 サーバ = 1 コンテナ。config は 1 枚を全インスタンスで共有し、差別化
   # (仮想サブネット等) は MQVPN_SUBNET / MQVPN_TUN_NAME の env が行う (JSON 専用)
-  entrypoint = pkgs.writeScript "mqvpn-oci-entrypoint" (builtins.readFile ./mqvpn-oci-entrypoint.sh);
-
-  # writeScript の出力は単一ファイル。dockerTools.buildLayeredImage は contents を
-  # イメージルートへマージするため、このファイルを直接 contents に入れると
-  # "Not a directory" で失敗する。そこでディレクトリでラップし、ルートの
-  # /mqvpn-oci-entrypoint に実体を置く。
-  entrypointLayer = pkgs.runCommand "mqvpn-oci-entrypoint-layer" { } ''
-    mkdir -p $out
-    cp ${entrypoint} $out/mqvpn-oci-entrypoint
-    chmod +x $out/mqvpn-oci-entrypoint
-  '';
+  # writeTextDir で直接 /mqvpn-oci-entrypoint 配置のレイヤを作る。
+  entrypointLayer = pkgs.writeTextDir "mqvpn-oci-entrypoint" (builtins.readFile ./mqvpn-oci-entrypoint.sh);
 
   # buildEnv が各パッケージの bin/ を /bin に統合する。
   # natScript と procps が共に /bin/sysctl を提供するため衝突し、
@@ -113,10 +104,5 @@ let
   };
 in
 {
-  inherit
-    entrypoint
-    natScript
-    rootEnv
-    ;
   inherit image;
 }

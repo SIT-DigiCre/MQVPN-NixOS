@@ -73,40 +73,31 @@ INST = 'instance=~"$instance"'
 
 
 def transform(expr):
-    out = []
-    last = 0
-    for m in re.finditer(r"mqvpn_[A-Za-z0-9_]+", expr):
-        end = m.end()
-        out.append(expr[last:end])
-        nxt = expr[end] if end < len(expr) else ""
-        if nxt == "{":
-            close = expr.find("}", end)
-            if close == -1:  # 壊れた式 (`{` が閉じない): 素として処理
-                out.append("{" + INST + "}")
-                last = end
-                continue
-            blk = expr[end : close + 1]
-            out.append(blk if "instance=" in blk else blk[:-1] + "," + INST + "}")
-            last = close + 1
-        else:
-            out.append("{" + INST + "}")
-            last = end
-    out.append(expr[last:])
-    return "".join(out)
+    def repl(m):
+        name, blk = m.group(1), m.group(2)
+        if blk is None:
+            return name + "{" + INST + "}"
+        return name + (blk if "instance=" in blk else blk[:-1] + "," + INST + "}")
+
+    return re.sub(r"(mqvpn_[A-Za-z0-9_]+)(\{[^}]*\})?", repl, expr)
 
 
-def walk(o):
+def walk(o, fn):
     if isinstance(o, dict):
         if "expr" in o and isinstance(o["expr"], str):
-            o["expr"] = transform(o["expr"])
+            fn(o, o["expr"])
         for v in o.values():
-            walk(v)
+            walk(v, fn)
     elif isinstance(o, list):
         for v in o:
-            walk(v)
+            walk(v, fn)
 
 
-walk(d)
+def _inject(o, expr):
+    o["expr"] = transform(expr)
+
+
+walk(d, _inject)
 
 # 5) セルフチェック: 全 PROMQL の各メトリックに instance フィルタが付いている
 # こと。「mqvpn_* の数 <= instance= の数」を要求する。mqvpn_ は関数名に
@@ -115,35 +106,16 @@ missing = []
 filters = 0
 
 
-def count_metrics(expr):
-    return len(re.findall(r"mqvpn_[A-Za-z0-9_]+", expr))
-
-
-def count_filters(expr):
-    return len(re.findall(r"instance=", expr))
-
-
-def check(o):
+def _verify(o, expr):
     global filters
-    if isinstance(o, dict):
-        if "expr" in o and isinstance(o["expr"], str):
-            # この検査は「mqvpn_* メトリックごとに instance= フィルタが 1 個以上」
-            # を要求する。mqvpn_ は関数名に現れないため確実に判定できる
-            # (プレースホルダ式 / 変数定義は "expr" キーを持たないので対象外)
-            n_metrics, n_filter = count_metrics(o["expr"]), count_filters(o["expr"])
-            filters += n_filter
-            if n_metrics > n_filter:
-                missing.append(
-                    f"{n_metrics} メトリック / {n_filter} フィルタ: {o['expr']}"
-                )
-        for v in o.values():
-            check(v)
-    elif isinstance(o, list):
-        for v in o:
-            check(v)
+    n_metrics = len(re.findall(r"mqvpn_[A-Za-z0-9_]+", expr))
+    n_filter = len(re.findall(r"instance=", expr))
+    filters += n_filter
+    if n_metrics > n_filter:
+        missing.append(f"{n_metrics} メトリック / {n_filter} フィルタ: {expr}")
 
 
-check(d)
+walk(d, _verify)
 if missing:
     sys.exit(
         "ERROR: instance フィルタが漏れた expr がある (上流が複数メトリック式か変換バグ):\n"

@@ -3,13 +3,13 @@
   lib,
   ...
 }: {
+  imports = [ ./test-base.nix ];
+
   networking.hostName = "mogami-client";
   # NOTE: usePredictableInterfaceNames は VM ビルダーが boot.kernelParams に
   # net.ifnames=0 を追加するため実質無効。interface 名は常に ethX になる。
 
   virtualisation.vmVariant = {
-    virtualisation.graphics = false;
-    virtualisation.qemu.options = [];
     # 管理は mq-mgmt-br0 の tap (mgmt にデフォルトルート無し → テスト経路の外に
     # 抜ける経路が構造的に存在しない)
     virtualisation.qemu.networkingOptions = lib.mkForce [
@@ -58,8 +58,6 @@
     password = "test";
   };
 
-  security.sudo.wheelNeedsPassword = false;
-
   networking.firewall.allowedTCPPorts = [ 22 ];
 
   environment.systemPackages = with pkgs; [
@@ -71,6 +69,4 @@
     dnsutils
     netcat-gnu
   ];
-
-  system.stateVersion = "26.05";
 }

@@ -9,41 +9,20 @@ if [ ! -f "$CONF" ]; then
   exit 1
 fi
 
-# インスタンスインデックスの決定。優先順: MQVPN_INSTANCE_IDX env > ホスト名末尾の数値。
-# 注: network_mode: host ではコンテナのホスト名がホスト(VM)のもの (例: mogami-server)
-# になりコンテナ名が取れない。また本イメージに hostname コマンドは無い。
-# そのため host-net 運用では MQVPN_INSTANCE_IDX の設定が必須 (bridge ならホスト名から導出可)。
+# インスタンスインデックスは MQVPN_INSTANCE_IDX で渡す (compose が必ず設定)。
 #   idx から導出: tun_name=mqvpn<idx> / listen=0.0.0.0:(443+idx) /
 #   control_listen=127.0.0.1:(9090+idx*2) / exporter=(9091+idx*2) /
 #   subnet=192.168.<idx>.0/24。明示的な MQVPN_* env があればそれが最優先。
 _OCI_IDX="${MQVPN_INSTANCE_IDX:-}"
 if [ -z "${_OCI_IDX}" ]; then
-  _OCI_HN="$(cat /etc/hostname 2>/dev/null)"
-  _OCI_TAIL="${_OCI_HN##*-}"
-  if [ -n "${_OCI_TAIL}" ] && [ "${_OCI_TAIL}" != "${_OCI_HN}" ] && [[ "${_OCI_TAIL}" =~ ^[0-9]+$ ]]; then
-    _OCI_IDX="${_OCI_TAIL}"
-  fi
-fi
-if [ -z "${_OCI_IDX}" ]; then
-  echo "mqvpn-oci: インスタンスインデックスを決定できません。MQVPN_INSTANCE_IDX を設定してください (host-net では必須)。" >&2
-  echo "mqvpn-oci: bridge 運用の場合はコンテナ名を 'mqvpn-server-<idx>' 形式にすれば自動導出されます。" >&2
+  echo "mqvpn-oci: MQVPN_INSTANCE_IDX を設定してください。" >&2
   exit 1
 fi
-if [ -z "${MQVPN_TUN_NAME:-}" ]; then
-  MQVPN_TUN_NAME="mqvpn${_OCI_IDX}"
-fi
-if [ -z "${MQVPN_SUBNET:-}" ]; then
-  MQVPN_SUBNET="192.168.${_OCI_IDX}.0/24"
-fi
-if [ -z "${MQVPN_LISTEN:-}" ]; then
-  MQVPN_LISTEN="0.0.0.0:$((443 + _OCI_IDX))"
-fi
-if [ -z "${MQVPN_CONTROL_LISTEN:-}" ]; then
-  MQVPN_CONTROL_LISTEN="127.0.0.1:$((9090 + _OCI_IDX * 2))"
-fi
-if [ -z "${MQVPN_EXPORTER_PORT:-}" ]; then
-  MQVPN_EXPORTER_PORT="$((9091 + _OCI_IDX * 2))"
-fi
+: "${MQVPN_TUN_NAME:=mqvpn${_OCI_IDX}}"
+: "${MQVPN_SUBNET:=192.168.${_OCI_IDX}.0/24}"
+: "${MQVPN_LISTEN:=0.0.0.0:$((443 + _OCI_IDX))}"
+: "${MQVPN_CONTROL_LISTEN:=127.0.0.1:$((9090 + _OCI_IDX * 2))}"
+: "${MQVPN_EXPORTER_PORT:=$((9091 + _OCI_IDX * 2))}"
 
 # env 上書きは JSON config 専用 — INI と組み合わせると黙って crash loop に
 # 落ちるため、JSON でなければ明示エラーで停止する
@@ -53,8 +32,6 @@ if [ -n "${MQVPN_SUBNET:-}" ] || [ -n "${MQVPN_TUN_NAME:-}" ] || [ -n "${MQVPN_L
     echo "mqvpn-oci: config を JSON 形式に変換するか、上書き env を外してください" >&2
     exit 1
   fi
-fi
-if [ -n "${MQVPN_SUBNET:-}" ] || [ -n "${MQVPN_TUN_NAME:-}" ] || [ -n "${MQVPN_LISTEN:-}" ] || [ -n "${MQVPN_CONTROL_LISTEN:-}" ]; then
   mkdir -p /tmp
   jq --arg s "${MQVPN_SUBNET:-}" --arg t "${MQVPN_TUN_NAME:-}" \
      --arg l "${MQVPN_LISTEN:-}" --arg c "${MQVPN_CONTROL_LISTEN:-}" \

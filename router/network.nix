@@ -7,13 +7,8 @@
 let
   lanInterface = config.services.mqvpn.lanInterface;
   localIp = "172.16.0.1";
-  # NAT 用トンネル名 (mqvpn.nix の clientConfigs と同順で導出)
-  tunNames = lib.imap0 (i: _: "mqvpn${toString i}") config.services.mqvpn.clientPorts;
 in
 {
-  boot.kernelParams = [
-    "ipv6.disable=1"
-  ];
   boot.kernel.sysctl = {
     "net.ipv4.ip_forward" = 1;
     "net.ipv4.conf.all.rp_filter" = 2;
@@ -21,9 +16,6 @@ in
     "net.ipv4.fib_multipath_hash_policy" = 1;
   };
   networking.enableIPv6 = false;
-  networking.dhcpcd.extraConfig = ''
-    noipv6
-  '';
   networking.firewall.checkReversePath = false;
 
   services.chrony = {
@@ -54,16 +46,6 @@ in
   networking.nat = {
     enable = true;
     internalInterfaces = [ lanInterface ];
-    # 全トンネルに mark ベースの MASQUERADE。
-    # 現在の nixpkgs は externalInterface=null なら総称ルール
-    # (-m mark --mark 0x1 -j MASQUERADE) を自前発行するためこの行は重複だが、
-    # モジュール内部実装に依存せず明示するために残す (nixpkgs 更新で挙動が
-    # 変わる可能性があるため削除しない)。
-    extraCommands = lib.concatStringsSep "\n" (
-      map (tunName: ''
-        iptables -t nat -A nixos-nat-post -o ${tunName} -m mark --mark 0x1 -j MASQUERADE
-      '') tunNames
-    );
   };
 
   services.kea.dhcp4 = {
@@ -92,17 +74,6 @@ in
                 "domain-name-servers"
                 "ntp-servers"
               ];
-        }
-      ];
-      loggers = [
-        {
-          name = "kea-dhcp4";
-          output_options = [
-            {
-              output = "stdout";
-            }
-          ];
-          severity = "INFO";
         }
       ];
     };

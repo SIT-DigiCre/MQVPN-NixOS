@@ -102,7 +102,7 @@ echo "  TOTAL (tunnel-bound) = ${total} Mbps"
 # --- サーバー CPU (最大値) ---
 echo
 echo "=== [result] server mqvpn CPU% (max over window) ==="
-grep -E "mqvpn-server" "$SLOG" | sed 's/%//' | awk '{v=$2+0; if(v>max) max=v} END{printf "  max mqvpn-server CPU = %.0f%%\n", max}' || echo "  (no data)"
+grep -E "mqvpn-server" "$SLOG" | awk '{gsub(/%/,"",$2); v=$2+0; if(v>max) max=v} END{printf "  max mqvpn-server CPU = %.0f%%\n", max}' || echo "  (no data)"
 
 # --- ルーター CPU ---
 echo
