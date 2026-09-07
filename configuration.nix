@@ -202,7 +202,12 @@ in
       # ---------------------------------------------------------------------
       # 2. 基本設定
       # ---------------------------------------------------------------------
-      services.chrony.enable = true;
+      services.chrony = {
+        enable = true;
+        extraConfig = ''
+          allow 172.16.0.0/12
+        '';
+      };
       networking.interfaces."${internalInterfaceName}" = {
         useDHCP = false;
         ipv4.addresses = [
@@ -278,16 +283,17 @@ in
                   pool = "172.16.0.50 - 172.31.255.254";
                 }
               ];
-              option-data = [
-                {
-                  name = "routers";
-                  data = localIp;
-                }
-                {
-                  name = "domain-name-servers";
-                  data = localIp;
-                }
-              ];
+              option-data =
+                map
+                  (name: {
+                    inherit name;
+                    data = localIp;
+                  })
+                  [
+                    "routers"
+                    "domain-name-servers"
+                    "ntp-servers"
+                  ];
             }
           ];
           loggers = [
@@ -337,6 +343,7 @@ in
         allowedUDPPorts = [
           53
           67
+          123 # NTP
         ];
       };
 

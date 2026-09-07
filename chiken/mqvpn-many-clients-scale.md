@@ -225,6 +225,9 @@ router 側 mqvpn client は TUN-ingress パケットの IPv4 src が自トンネ
   (Stratum 3・offset 0.25ms・Leap Normal。tunnel＋MASQUERADE 経由で同期。
   chrony モジュールが timesyncd を自前で mkForce false するため明示行は不要と確認し削除)。
   QEMU RTC は起動時から 1.3秒進んでいた (host 時計由来)。無規律放置は DNSSEC 等の時限爆弾のため維持
+- LAN NTP 提供も実装済み (`chrony.extraConfig allow 172.16.0.0/12`＋firewall UDP 123＋Kea option 42)。
+  lab 検証: allow 行・FW 開放・lease 内 `ntp_servers=172.16.0.1`・生 NTP 問合せに stratum 3 応答を確認。
+  WAN からの問合せには chrony ACL で応答しない
 - server 側 `forward_inner_ip` の src 照合 (LOG_W) は lab 60分で 0 件。発火時は renumber 競合等の
   目安になるため、DNS 障害時は `docker logs | grep "src IP mismatch"` を見ること
 - `get_reorder_stats` RPC は живых (lab で取得可。全カウンタ 0)。reorder drop は STATUS に出ないため、
