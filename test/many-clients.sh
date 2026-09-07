@@ -67,6 +67,19 @@ rtr_wan=($(nix eval --json "path:$(cd "$SCRIPT_DIR/.." && pwd)#nixosConfiguratio
 rx_bytes() { # $1=iface (数値のみ返す)
   ssh_rtr "ip -s link show $1 2>/dev/null | awk '/RX:/{getline;print \$1}'" 2>/dev/null | grep -E '^[0-9]+$' | tail -1
 }
+
+# トンネル確立待ち (起動直後の bulk 空振り防止。bench.sh の wait_wlb_steady の軽量版:
+# ECMP メンバー数＋peer 付与を見る。QUIC ハンドシェイク完了まで最大 120s)
+wait_tunnels() {
+  local i n
+  for i in $(seq 1 24); do
+    n=$(ssh_rtr 'm=$(ip route show default 2>/dev/null | grep -c "nexthop dev mqvpn"); p=$(for d in mqvpn0 mqvpn1 mqvpn2; do ip -o addr show $d 2>/dev/null | grep -o "peer [0-9.]*"; done | wc -l); echo "$m/$p"' 2>/dev/null | grep -oE '[0-9]+/[0-9]+' | tail -1)
+    [ "$n" = "3/3" ] && { echo "tunnels ready (ECMP 3 + peers 3)"; return 0; }
+    sleep 5
+  done
+  echo "WARN: tunnels not fully ready ($n). continue anyway" >&2
+  return 0
+}
 tx_bytes() { # $1=iface (数値のみ返す。up 方向計測用)
   ssh_rtr "ip -s link show $1 2>/dev/null | awk '/TX:/{getline;print \$1}'" 2>/dev/null | grep -E '^[0-9]+$' | tail -1
 }
@@ -266,7 +279,7 @@ EOF
 do_bulk() {
   local n="${1:-70}" sec="${2:-20}" dir="${3:-down}"
   [ "$dir" = down ] || [ "$dir" = up ] || { echo "dir must be down|up"; exit 1; }
-  need_ips "$n"; ensure_iperfd_mnet "$n"
+  need_ips "$n"; ensure_iperfd_mnet "$n"; wait_tunnels
   echo "== bulk: $n clients x 1flow $dir (${sec}s, srcIP 別) =="
   local i w snap
   snap() { if [ "$dir" = up ]; then tx_bytes "$1"; else rx_bytes "$1"; fi; }

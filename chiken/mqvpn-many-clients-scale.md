@@ -193,7 +193,7 @@ router 側 mqvpn client は TUN-ingress パケットの IPv4 src が自トンネ
 ## 6. 実環境への示唆 (更新版)
 
 1. conntrack: 上限に余裕あり (§3.2)。設定変更不要
-2. DNS: §4 の通り。F1 でほぼ消せる見込み。warm cache＋実 stub では散発報告レベル
+2. DNS: §4 の通り。F0 (MASQUERADE) で解消済み。warm cache＋実 stub では散発報告レベル
 3. 巻き添え: 遅延膨張は確定 (§3.4)、欠損は条件次第
 4. 非問題: ECMP 均等化、`max_clients=64` (対ルーター数)、Kea、neigh、NAT port、サーバー CPU、reorder
 
@@ -235,4 +235,25 @@ router 側 mqvpn client は TUN-ingress パケットの IPv4 src が自トンネ
 - addr pool 枯渇: 不成立。MAX 254 に対し max_clients=64 で上限がかかり、destroy 時 release あり
   (`mqvpn_server.c:811,1145`)。reconnect 競合の一時的 slot 消費のみ (.0.2→.0.3 進行はこのため)
 - Prometheus disk: 約26MB/15日 (95 series×3、30s scrape) のため問題なし
+- ECMP dead-leg 挙動 (実測): `ip link set mqvpn1 down` で当該 leg のみ
+  `dead linkdown` 化しルートは 2 本で継続、復帰で自動復元。貫通 ping 50/50 欠損ゼロ。
+  UNREGISTER (TUN再作成) 時のみ全体削除→networkd が再作成時に張り直し (~2秒)。
+  TUN-UP-but-wedged (carrier 維持の黑洞) は新旧どちらの方式でも検出不可 (peer addr 基準のため)
+- `ManageForeignRoutes=no` は書ける (`networks.<name>.extraConfig` の freeform で unit 末尾に
+  付与可能と確認) が、あえて書かない。TUN 上に foreign route は存在せず (pin は WAN dev)、
+  かつ `no` は設定変更時の stale route 残留を招くため、既定動作 (管理外は networkd が掃除) の方が
+  clientPorts 変更時に安全。KeepConfiguration のみで実証済み
 - `status` の kea lease 数はファイル glob 頼み (best-effort)
+
+## 8. 構成変更 (本 investigation の副産物。lab 検証済み)
+
+- **ECMP 管理の networkd 移行**: keeper の nhid 手書き管理を廃止し、
+  `systemd.network` の dev-only `MultiPathRoute (@mqvpnX)` に移管 (lab spike→本実装)。
+  flap→約2秒で自動復旧、ping 60発欠損ゼロ。全滅時は per-WAN metric フォールバックで
+  fail-open (復元操作不要。server pin 経由の制御到達を確認)。keeper は
+  `mqvpn-path-keeper` に改名し server pin＋SNAT 確保のみ (60秒ポーリング)
+- **systemd-resolved 無効化**: 127.0.0.53 stub と unbound (0.0.0.0:53) の bind 競合で
+  起動順により LAN DNS 全滅 (lab で全滅を確認)。確定的に無効化し、
+  `networking.nameservers = [ "127.0.0.1" ]` に固定
+- **many-clients.sh に `wait_tunnels` 追加**: 起動直後の bulk 空振り (ECMP はあるが
+  QUIC 未確立で 70/70 zero) を踏み、ECMP＋peer 確認ゲートを bulk/mix 前に挿入

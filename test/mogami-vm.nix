@@ -43,7 +43,7 @@ in {
   networking.useDHCP = false;
 
   # LAN / mgmt は静的。WAN は本番同様に自ゲートウェイ(10.200.i.1)をデフォルト経由で持つ。
-  # この per-WAN デフォルトがキーパー(mqvpn-ecmp-assert)の `ip route show dev <wan> default`
+  # この per-WAN デフォルトがキーパー(mqvpn-path-keeper)の `ip route show dev <wan> default`
   # によるゲートウェイ発見のソース。DHCP は不要(キーパーは dhcpcd にもフォールバックするが、
   # 静的デフォルトで十分かつ確実)。
   networking.interfaces = lib.mkMerge [
@@ -65,7 +65,7 @@ in {
 
   # 各 WAN のデフォルトルート(ゲートウェイ 10.200.i.1、独自 metric で 12 本共存)は
   # mqvpn-wan-gateway-routes サービスで張る。NixOS の ipv4.routes は metric を受け付けない
-  # ため ip route で直接張る。キーパー(mqvpn-ecmp-assert)が `ip route show dev <wan> default`
+  # ため ip route で直接張る。キーパー(mqvpn-path-keeper)が `ip route show dev <wan> default`
   # で各 WAN のゲートウェイを発見し、サーバーを /32 でピンするために必要。
   systemd.services.mqvpn-wan-gateway-routes = {
     wantedBy = [ "multi-user.target" ];

@@ -142,13 +142,6 @@ in
         }) mqvpnClientConfigs
       );
 
-      # ECMP 対象のトンネル一覧 (dev + weight=1)。peer はサーバーから配布されるため
-      # 設定値を持たず、ECMP keeper が実行時にカーネルから導出する。
-      ecmpTunnels = map (c: {
-        dev = c.tunName;
-        weight = 1;
-      }) mqvpnClientConfigs;
-
       # keeper スクリプトへ展開する WAN IF 一覧とサーバー IP
       wanIfaces = lib.concatStringsSep " " config.services.mqvpn.interfaces;
       serverHost = mqvpnAuth.server_addr or "";
@@ -208,6 +201,14 @@ in
           allow 172.16.0.0/12
         '';
       };
+      # systemd-resolved は無効化: 127.0.0.53 の stub が :53 を掴むと unbound
+      # (0.0.0.0:53) が bind 競合で起動失敗する。起動順のレースで勝敗が変わるため
+      # 確定的に無効化する (lab で LAN DNS 全滅を確認)。ルーター自身の名前解決は
+      # unbound (127.0.0.1) が担う。
+      services.resolved.enable = false;
+      # resolved 無効化に伴い、ルーター自身の参照先を unbound (127.0.0.1) に固定する
+      # (既定の stub-resolv.conf は 127.0.0.53 を指すため)。
+      networking.nameservers = [ "127.0.0.1" ];
       networking.interfaces."${internalInterfaceName}" = {
         useDHCP = false;
         ipv4.addresses = [
@@ -397,6 +398,30 @@ in
       };
 
       # ---------------------------------------------------------------------
+      # 8b. ECMP ライフサイクル (systemd-networkd)
+      # ---------------------------------------------------------------------
+      # TUN (mqvpn*) の出現/再作成に追従して ECMP default を維持する。
+      # dev-only MultiPathRoute (@mqvpnX、gateway 不要・weight 1) で PtP TUN に直結。
+      # KeepConfiguration + ManageForeign* no で mqvpn 割当のアドレスには触れない。
+      # 他 IF (LAN/WAN/mgmt) は従来の classic 管理のまま混在運用する。
+      # netlink イベントで自動復旧するため、手書きポーリングは不要 (lab spike で検証)。
+      systemd.network.enable = true;
+      systemd.network.networks."40-mqvpn" = {
+        matchConfig.Name = "mqvpn*";
+        networkConfig = {
+          # nixpkgs の Network セクション検査に無い ManageForeign* は書けないため、
+          # KeepConfiguration のみ指定 (lab spike でこの組合せの無害を確認済み)。
+          KeepConfiguration = true;
+        };
+        routes = [
+          {
+            Destination = "0.0.0.0/0";
+            MultiPathRoute = map (c: "@${c.tunName} 1") mqvpnClientConfigs;
+          }
+        ];
+      };
+
+      # ---------------------------------------------------------------------
       # 9. MQVPN (全クライアントは clientPorts から一様生成される)
       # ---------------------------------------------------------------------
       systemd.services = lib.mkMerge [
@@ -426,24 +451,24 @@ in
           };
         }
         clientUnits
-        # ルートキーパー:
-        #  駆動は netlink イベント (link/addr/route)＋60秒フェイルセーフ。3秒ポーリングは廃止。
+        # ルートキーパー (server pin + tunnel SNAT の維持)。
+        # ECMP ライフサイクルは systemd-networkd が担う (下記 [X.] 参照)。
         #  - サーバー制御プレーン経路のピン (manage_routes=false のため上流の setup_routes
-        #    は動かない。WAN デフォルトが消えても <server>/32 を GW 経由で維持する)
-        #  - ECMP デフォルトの再アサート (tun 再作成時はカーネルが ECMP ルートを全削除。
-        #    生存トンネルのみでアサートし、1 本でも生きていれば必ず張る)
+        #    は動かない。WAN デフォルトが消えても <server>/32 を GW 経由で維持する。
+        #    GW は可視デフォルト優先・無ければ dhcpcd リースで補完し、変化時のみ更新)
         #  - router-local → tunnel の SNAT 確保 (tun_validate_src 対策):
         #    router 側 mqvpn は TUN-ingress の src≠自 tunnel IP を silent drop する。
         #    LAN 側は NAT mark (0x1) で MASQUERADE され out-dev addr になるため常時一致
         #    するが、router-local (unbound 上流等) は mark 無しで素通しされ、ECMP 下の
         #    src 選択がトンネルと独立に分散 → 約2/3落下 (lab実証: spray 63–86%)。
         #    `-o mqvpn+ MASQUERADE` で out-dev addr に確定させ常時一致させる。
-        #    LAN 側は既存 mark 規則と同値で無害。ECMP spray は維持 (pin 不要)。
-        #    chiken/mqvpn-many-clients-scale.md §4 参照
-        #  - fail-open: 全トンネル死亡時は WAN デフォルトを復元
+        #    LAN 側は既存 mark 規則と同値で無害。chiken/mqvpn-many-clients-scale.md §4 参照
+        #  - fail-open はカーネルの metric フォールバックに委ねる (per-WAN デフォルト
+        #    metric 1–12 が常駐し、ECMP 消失時は自動でそちらへ落ちる)。復元操作は不要
+        # 60秒ポーリング (GW 変化は稀なため。設定変更は全て冪等)。
         {
-          mqvpn-ecmp-assert = {
-            description = "ECMP default / server-pin route keeper";
+          mqvpn-path-keeper = {
+            description = "server-pin / tunnel SNAT keeper";
             after = [ "network-online.target" ] ++ map (c: "${c.unitName}.service") mqvpnClientConfigs;
             wants = [ "network-online.target" ] ++ map (c: "${c.unitName}.service") mqvpnClientConfigs;
             wantedBy = [ "multi-user.target" ];
@@ -452,32 +477,22 @@ in
               iproute2
               gawk
               iptables
-              coreutils
-              # fail-open / ピン用 GW の補完発見 (dhcpcd -U で現在リースを読む)
+              # ピン用 GW の補完発見 (dhcpcd -U で現在リースを読む)
               dhcpcd
             ];
 
             serviceConfig = {
               Restart = "always";
               RestartSec = "5";
-              ExecStart = pkgs.writeShellScript "mqvpn-ecmp-assert.sh" ''
-                # peer はサーバーから配布されるため kernel から導出する
-                peer_of() {
-                  ip -o addr show dev "$1" |
-                    awk '$3=="inet" { for (i=1; i<=NF; i++) if ($i=="peer") { split($(i+1), a, "/"); print a[1]; break } }'
-                }
+              ExecStart = pkgs.writeShellScript "mqvpn-path-keeper.sh" ''
                 wan_ifaces="${wanIfaces}"
                 server_host="${serverHost}"
-                # 最後に観測した WAN デフォルトの nexthops (トンネル稼働中は ECMP に置換され
-                # 見えないため、復元用にループ間で保持 — 前回の記憶)
+                # 最後に観測した WAN デフォルトの nexthops (GW 変更凍結の防止 — 前回の記憶)
                 wan_nexthops=""
-                wan_restored=""
-                # 1回の同期パス。起動時・netlink イベント時・60秒フェイルセーフ時に呼ぶ。
-                # 冪等な replace/del のみで構成 (何度呼んでも同じ状態に収束する)。
-                sync_once() {
-                  # 1) WAN GW の発見 (可視デフォルト優先、無ければ dhcpcd リースで補完 —
-                  #    GW 変更凍結の防止) + サーバーピン (/32 を nexthop 1 回で
-                  #    replace。IF ごとに分けると最後の 1 本しか残らない)
+                while true; do
+                  # 1) WAN GW の発見 (可視デフォルト優先、無ければ dhcpcd リースで補完) +
+                  #    サーバーピン (/32 を nexthop 1 回で replace。IF ごとに分けると
+                  #    最後の 1 本しか残らない)
                   new_wan=""
                   if [ -n "$server_host" ]; then
                     for ifx in $wan_ifaces; do
@@ -494,72 +509,17 @@ in
                   [ -n "$new_wan" ] && wan_nexthops="$new_wan"
                   if [ -n "$wan_nexthops" ] && [ -n "$server_host" ]; then
                     if ! ip route replace $server_host $wan_nexthops 2>/dev/null; then
-                      echo "mqvpn-ecmp-assert: server pin replace failed: ip route replace $server_host $wan_nexthops" >&2
+                      echo "mqvpn-path-keeper: server pin replace failed: ip route replace $server_host $wan_nexthops" >&2
                     fi
                   fi
-
-                  # 2) 生存トンネル集合を nhid グループ (id 2000) に同期して ECMP デフォルトを張る。
-                  #    tun 再作成でカーネルが nh ごと削除してもグループは自動縮退し
-                  #    ルートは生存メンバーで継続 (旧方式の全削除黒塗りが消える)。
-                  #    全滅時はカーネルがグループ/ルートを消す → fail-open へ。
-                  members=""
-                  ${lib.concatStringsSep "\n" (
-                    lib.imap1 (i: t: ''
-                      dev="${t.dev}"
-                      nhid=$((1000 + ${toString i}))
-                      peer=$(peer_of "$dev")
-                      if [ -n "$peer" ]; then
-                        # PtP トンネル(mqvpn*) は dev のみでピアが確定する。
-                        # `via $peer` は mqvpn0 が副アドレス(192.168.0.2/32 brd ...)を
-                        # 持つ場合に "invalid gateway" で失敗するため dev のみを指定。
-                        ip nexthop add id $nhid dev $dev 2>/dev/null ||
-                          ip nexthop replace id $nhid dev $dev 2>/dev/null ||
-                          echo "mqvpn-ecmp-assert: nexthop $nhid sync failed ($dev)" >&2
-                        members="$members/$nhid"
-                      else
-                        ip nexthop del id $nhid 2>/dev/null
-                      fi
-                    '') ecmpTunnels
-                  )}
-                  if [ -n "$members" ]; then
-                    m="''${members#/}"
-                    ip nexthop add id 2000 group "$m" 2>/dev/null ||
-                      ip nexthop replace id 2000 group "$m" 2>/dev/null ||
-                      echo "mqvpn-ecmp-assert: group 2000 sync failed ($m)" >&2
-                    if ! ip route replace default nhid 2000 2>/dev/null; then
-                      echo "mqvpn-ecmp-assert: default nhid 2000 replace failed (members=$m)" >&2
-                    fi
-                    wan_restored=""
-                  else
-                    # fail-open: 全トンネル死亡時は WAN デフォルトを復元。
-                    # 遷移時のみ成功ログ、失敗は毎ループログ (自己修復までの診断用)
-                    if [ -n "$wan_nexthops" ]; then
-                      if ip route replace default $wan_nexthops 2>/dev/null; then
-                        [ -z "$wan_restored" ] && echo "mqvpn-ecmp-assert: fail-open: WAN default restored ($wan_nexthops)" >&2
-                        wan_restored=1
-                      else
-                        echo "mqvpn-ecmp-assert: fail-open FAILED: $wan_nexthops (retry next loop)" >&2
-                        wan_restored=""
-                      fi
-                    fi
-                  fi
-                  # 3) router-local → tunnel の SNAT 確保 (tun_validate_src 対策)。
+                  # 2) router-local → tunnel の SNAT 確保 (tun_validate_src 対策)。
                   #    -o mqvpn+ で MASQUERADE すると out-dev addr に確定し常時一致する
                   #    (ECMP spray 維持、トンネル IP 変更にも追従)。LAN 側は既存 mark
                   #    規則と同値で無害。flush されても次ループで復旧する。
                   iptables -t nat -C nixos-nat-post -o "mqvpn+" -j MASQUERADE 2>/dev/null ||
                     iptables -t nat -A nixos-nat-post -o "mqvpn+" -j MASQUERADE 2>/dev/null || true
-                }
-                sync_once
-                # フェイルセーフ: イベント取こぼし時のため60秒毎にも同期 (3秒ポーリングは廃止)
-                while true; do sleep 60; sync_once; done &
-                # netlink イベント駆動: TUN再作成・peer付与・カーネルのルート削除を検知し即時同期。
-                # バーストは1秒の debounce で吸収。monitor が死ねばスクリプト全体が終了し
-                # Restart=always で再起動する (その際 sync_once が走る)。
-                while IFS= read -r _ev; do
-                  while IFS= read -r -t 1 _ev2; do :; done
-                  sync_once
-                done < <(stdbuf -o0 -e0 ip monitor link addr route 2>/dev/null)
+                  sleep 60
+                done
               '';
             };
           };
