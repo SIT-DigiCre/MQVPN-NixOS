@@ -4,8 +4,14 @@
 set -euo pipefail
 
 role="${1:?usage: $0 <server|router|client|mnet>}"
+# VMイメージは使い捨てなので /tmp 配下に置く (flake内に置くと
+# `nix build path:...` が巨大qcow2ごと /nix/store にコピーし続けて
+# ディスクを圧迫するため)。
+IMGDIR="/tmp/mqvpn-vm-images"
+mkdir -p "$IMGDIR"
 case "$role" in
   server)
+    img="mogami-server.qcow2"
     vm="$(readlink -f /tmp/result-server)/bin/run-mogami-server-vm"
     echo "=== starting server VM ==="
     echo "  SSH  : ssh digicre@192.168.50.2  (password: server)"
@@ -13,6 +19,7 @@ case "$role" in
     echo "  Mgmt : ts-mgmt -> mq-mgmt-br0 "
     ;;
   router)
+    img="mogami-vm.qcow2"
     vm="$(readlink -f /tmp/result-mogami)/bin/run-mogami-vm-vm"
     echo "=== starting router VM ==="
     echo "  SSH       : ssh digicre@192.168.50.1  (password: router)"
@@ -22,6 +29,7 @@ case "$role" in
     echo "  Mgmt      : tr-mgmt -> mq-mgmt-br0 "
     ;;
   client)
+    img="mogami-client.qcow2"
     vm="$(readlink -f /tmp/result-client)/bin/run-mogami-client-vm"
     echo "=== starting client VM ==="
     echo "  SSH     : ssh testuser@192.168.50.3  (password: test)"
@@ -29,6 +37,7 @@ case "$role" in
     echo "  Mgmt    : tc-mgmt -> mq-mgmt-br0 "
     ;;
   mnet)
+    img="mogami-mnet.qcow2"
     vm="$(readlink -f /tmp/result-mnet)/bin/run-mogami-mnet-vm"
     echo "=== starting mnet VM (実ネットワーク側 / ベンチターゲット) ==="
     echo "  SSH     : ssh digicre@192.168.50.4  (password: mnet)"
@@ -42,4 +51,5 @@ case "$role" in
 esac
 echo ""
 
+export NIX_DISK_IMAGE="$IMGDIR/$img"
 exec "$vm" -smp 2

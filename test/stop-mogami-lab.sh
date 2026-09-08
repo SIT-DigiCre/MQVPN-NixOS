@@ -42,9 +42,12 @@ echo "  remaining mq-mgmt rules: ${leo}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-rm -rf "$SCRIPT_DIR/result-mogami" "$SCRIPT_DIR/result-client" "$SCRIPT_DIR/result-server" "$SCRIPT_DIR/result-mnet"
-rm -f "$SCRIPT_DIR/mogami-vm.qcow2" "$SCRIPT_DIR/mogami-client.qcow2" "$SCRIPT_DIR/mogami-server.qcow2" "$SCRIPT_DIR/mogami-mnet.qcow2"
+rm -rf "$SCRIPT_DIR"/result-{mogami,client,server,mnet}
 
-rm -f "$REPO_DIR/mogami-vm.qcow2" "$REPO_DIR/mogami-client.qcow2" "$REPO_DIR/mogami-server.qcow2" "$REPO_DIR/mogami-mnet.qcow2"
+# VMイメージは使い捨てなので /tmp 配下。stop時はここを消す。
+IMGDIR="/tmp/mqvpn-vm-images"
+rm -f "$IMGDIR"/mogami-{vm,client,server,mnet}.qcow2
+# 旧配置 (flake内に置かれていた実体・symlink) の残骸掃除
+rm -f "$SCRIPT_DIR"/mogami-{vm,client,server,mnet}.qcow2 "$REPO_DIR"/mogami-{vm,client,server,mnet}.qcow2
 
 echo "done"
