@@ -30,12 +30,13 @@ setup_network() {
     mktap "$tap" mqvpn-srv-br0
     echo "  $tap -> mqvpn-srv-br0"
   done
-  # 各 WAN 用ゲートウェイをホストが保持 (10.200.i.1/24)。ルーター WAN NIC は
-  # 静的デフォルトルートでこの GW を経由し、サーバー(10.200.99.2)へ抜ける
-  # → 本番の「WAN は ISP 経由でサーバーへ抜ける」と同形状 (DHCP は不要)。
+  # 各 WAN 用ゲートウェイをホストが保持 (10.200.i.1/24) し、ISP シムの DHCP
+  # (dnsmasq) でルーター WAN NIC に 10.200.i.2 + GW を配布する
+  # → 本番の「WAN は DHCP で ISP 経由」と同形状。
   for i in {0..11}; do
     sudo ip addr add "10.200.$i.1/24" dev mqvpn-srv-br0 2>/dev/null || true
   done
+  start_lab_dhcp
 
   echo "=== creating server bridge: mqvpn-srv2-br0 (10.200.99.0/24, ルーターから経路越し) ==="
   sudo ip link add mqvpn-srv2-br0 type bridge
@@ -92,6 +93,66 @@ setup_network() {
   done
 }
 
+# ISP シム DHCP (dnsmasq) を専用 netns で立てる。MAC ピン留めで
+# 10.200.i.2 + router 10.200.i.1 を配布し、現行の静的マッピングを再現する。
+# MAC は test/mogami-vm.nix の allNics と対応 (trw0→eth1→10.200.0.2、
+# trw1→eth3→10.200.1.2、…、trw11→eth13→10.200.11.2)。
+# netns に閉じ込める理由: ホストの FW・ネットワーク設定に一切触れないため
+# (netns は独自の FW テーブル = 既定 ACCEPT を持つ)。veth 片端をブリッジに
+# 差すだけで L2 到達し、後片付けは `ip netns delete` 一発で残骸なし。
+# 対象ブリッジ以外には一切触れない (dnsmasq 側は --bind-interfaces)。
+start_lab_dhcp() {
+  echo "=== starting lab DHCP (dnsmasq in netns mqvpn-isp) ==="
+  local bin
+  if command -v dnsmasq >/dev/null; then
+    bin="$(command -v dnsmasq)"
+  else
+    echo "  dnsmasq not found, provisioning via nix (one-time download)"
+    bin="$(nix build --no-link --print-out-paths 'nixpkgs#dnsmasq')/bin/dnsmasq"
+  fi
+  [ -x "$bin" ] || { echo "ERROR: dnsmasq provisioning failed"; exit 1; }
+  # 再実行時に前回残があっても壊れないよう stop と同じ順で掃除する
+  # (kill せず netns だけ消すと旧 dnsmasq が netns を掴んだまま残り、
+  # pidfile 上書きで orphan 化 + 残存 isp-br で `ip link add` が File exists になる)。
+  if [ -f /tmp/mqvpn-dnsmasq.pid ]; then
+    sudo kill "$(cat /tmp/mqvpn-dnsmasq.pid)" 2>/dev/null || true
+  fi
+  sudo ip link delete isp-br 2>/dev/null || true
+  sudo ip netns delete mqvpn-isp 2>/dev/null || true
+  sudo ip netns add mqvpn-isp
+  sudo ip link add isp-dhcp type veth peer name isp-br
+  sudo ip link set isp-br master mqvpn-srv-br0
+  sudo ip link set isp-br up
+  sudo ip link set isp-dhcp netns mqvpn-isp
+  sudo ip netns exec mqvpn-isp ip link set lo up
+  sudo ip netns exec mqvpn-isp ip link set isp-dhcp up
+  # dnsmasq は到着 IF 直下以外の subnet を配らないため、12 subnet 分を
+  # veth に載せる (.254 は未使用。netns 内のみ有効)。
+  # dnsmasq はアドレスの無い IF のパケットを捨てるため、この付与が必須。
+  for i in {0..11}; do
+    sudo ip netns exec mqvpn-isp ip addr add "10.200.$i.254/24" dev isp-dhcp
+  done
+  # 前回残のファイルを sudo で掃除 (dnsmasq は --user=root 固定のため root 所有になる)
+  sudo rm -f /tmp/mqvpn-dnsmasq.pid /tmp/mqvpn-dnsmasq.leases /tmp/mqvpn-dnsmasq.log
+  local macs=(5b 5d 5e 5f 60 61 62 63 64 65 66 68)
+  local args=(
+    --interface=isp-dhcp --bind-interfaces --port=0 --user=root
+    --dhcp-authoritative --pid-file=/tmp/mqvpn-dnsmasq.pid
+    --log-facility=/tmp/mqvpn-dnsmasq.log --dhcp-leasefile=/tmp/mqvpn-dnsmasq.leases
+  )
+  local i mac
+  for i in {0..11}; do
+    mac="52:54:00:12:34:${macs[$i]}"
+    args+=(
+      "--dhcp-host=$mac,10.200.$i.2,net:wan$i"
+      "--dhcp-range=net:wan$i,10.200.$i.2,10.200.$i.2,255.255.255.0,10m"
+      "--dhcp-option=net:wan$i,option:router,10.200.$i.1"
+    )
+  done
+  sudo ip netns exec mqvpn-isp "$bin" "${args[@]}"
+  echo "  dnsmasq pid: $(cat /tmp/mqvpn-dnsmasq.pid 2>/dev/null || echo '?') (log: /tmp/mqvpn-dnsmasq.log)"
+}
+
 # ビルドして出来たら即座にその VM を起動する (並列用)
 build_and_start() {
   local link="$1" attr="$2" suffix="$3"
@@ -127,7 +188,7 @@ done
 
 echo ""
 echo "=== done ==="
-echo "WAN: 12x tap via mqvpn-srv-br0 (static /24, GW 10.200.i.1 = ISP シム) -> host -> mqvpn-srv2-br0"
+echo "WAN: 12x tap via mqvpn-srv-br0 (DHCP 10.200.i.2/24, GW 10.200.i.1 = ISP シム) -> host -> mqvpn-srv2-br0"
 echo "Server: ts-mq via mqvpn-srv2-br0 (10.200.99.2, ルーターから経路越し)"
 echo "LAN: $TAP_ROUTER + $TAP_CLIENT via $BRIDGE (172.16.0.0/12)"
 echo "Mgmt: 4x tap via mq-mgmt-br0 (192.168.50.1 router / .2 server / .3 client / .4 mnet)"

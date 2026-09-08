@@ -43,10 +43,11 @@ in {
 
   networking.useDHCP = false;
 
-  # LAN / mgmt は静的。WAN は本番同様に自ゲートウェイ(10.200.i.1)をデフォルト経由で持つ。
-  # この per-WAN デフォルトがキーパー(mqvpn-path-keeper)の `ip route show dev <wan> default`
-  # によるゲートウェイ発見のソース。DHCP は不要(キーパーは dhcpcd にもフォールバックするが、
-  # 静的デフォルトで十分かつ確実)。
+  # LAN / mgmt は静的。WAN は本番同様に DHCP で取得する (ISP シム = ホストの
+  # dnsmasq が MAC ピン留めで 10.200.i.2 + GW 10.200.i.1 を配布)。
+  # DHCP で入る per-WAN デフォルトがキーパー(mqvpn-path-keeper)の
+  # `ip route show dev <wan> default` によるゲートウェイ発見のソース
+  # (本番と同じ経路。キーパーの dhcpcd リースフォールバックは温存)。
   networking.interfaces = lib.mkMerge [
     {
       "${vmLanInterface}" = {
@@ -58,32 +59,17 @@ in {
         ipv4.addresses = [{ address = vmMgmtAddr; prefixLength = 24; }];
       };
     }
-    (lib.listToAttrs (lib.imap0 (i: name: lib.nameValuePair name {
-      useDHCP = false;
-      ipv4.addresses = [{ address = "10.200.${toString i}.2"; prefixLength = 24; }];
+    (lib.listToAttrs (map (name: lib.nameValuePair name {
+      useDHCP = true;
     }) vmWanInterfaces))
   ];
 
-  # 各 WAN のデフォルトルート(ゲートウェイ 10.200.i.1、独自 metric で 12 本共存)は
-  # mqvpn-wan-gateway-routes サービスで張る。NixOS の ipv4.routes は metric を受け付けない
-  # ため ip route で直接張る。キーパー(mqvpn-path-keeper)が `ip route show dev <wan> default`
-  # で各 WAN のゲートウェイを発見し、サーバーを /32 でピンするために必要。
-  systemd.services.mqvpn-wan-gateway-routes = {
-    wantedBy = [ "multi-user.target" ];
-    wants = [ "network-online.target" ];
-    after = [ "network-online.target" ];
-    serviceConfig = {
-      Type = "oneshot";
-      RemainAfterExit = true;
-    };
-    script = let
-      cmds = lib.concatStringsSep "\n" (lib.imap0 (i: name: ''
-        ${pkgs.iproute2}/bin/ip route replace default via 10.200.${toString i}.1 dev ${name} metric ${toString (i + 1)}
-      '') vmWanInterfaces);
-    in ''
-      ${cmds}
-    '';
-  };
+  # DHCP デフォルトに per-WAN metric (1-12) を付与し 12 本共存させる
+  # (fail-open 時のフォールバック順序。dhcpcd 既定は 1000+ifindex)。
+  networking.dhcpcd.extraConfig = lib.concatStringsSep "\n" (lib.imap0 (i: name: ''
+    interface ${name}
+    metric ${toString (i + 1)}
+  '') vmWanInterfaces);
 
   # qemu の NIC 構成を完全に明示 (ビルダー既定の user-net を含め一切自動追加させない)。
   # MAC は 3 VM 間で共有ブリッジ上ユニークになるよう明示 (-nic の MAC 省略時は

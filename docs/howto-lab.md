@@ -33,7 +33,7 @@ host
   ├── SSH digicre@192.168.50.4 ── mogami-mnet (password: mnet)
   └── HTTP http://192.168.50.1/ ── mogami-vm (eth2, glances ダッシュボード)
 
-  WAN: 12× tap (eth1/3-13) → mqvpn-srv-br0 (static /24, GW 10.200.i.1 = ISP シム) → host → mqvpn-srv2-br0 → mogami-server (10.200.99.2:443)
+  WAN: 12× tap (eth1/3-13) → mqvpn-srv-br0 (DHCP 10.200.i.2/24, GW 10.200.i.1 = ISP シム) → host → mqvpn-srv2-br0 → mogami-server (10.200.99.2:443)
 ```
 
 ## IP range 一覧
@@ -41,8 +41,8 @@ host
 | セグメント | Range | 構成 |
 |-----------|-------|------|
 | LAN (Client↔Router) | `172.16.0.0/12` | Router `172.16.0.1`, Client `172.16.0.2` (DHCP) |
-| WAN (Router↔Server) | `10.200.i.0/24` ×12 (各 NIC に /24 GW 10.200.i.1) | Server `10.200.99.2` (別ブリッジ mqvpn-srv2-br0)、Router WAN は静的 `10.200.i.2/24` + デフォルトルート `via 10.200.i.1` |
-| MQVPN トンネル (ECMP) | `192.168.0.0/24` / `192.168.1.0/24` | Server `192.168.0.1` / `192.168.1.1` (server mode)、Router `192.168.0.x` / `192.168.1.x` (client)。server-0/1 で別 subnet |
+| WAN (Router↔Server) | `10.200.i.0/24` ×12 (各 NIC に /24 GW 10.200.i.1) | Server `10.200.99.2` (別ブリッジ mqvpn-srv2-br0)、Router WAN は DHCP (`10.200.i.2` を MAC ピン留めで固定割当、本番同様) |
+| MQVPN トンネル (ECMP) | `192.168.0.0/24` / `192.168.1.0/24` / `192.168.2.0/24` | Server `192.168.{0,1,2}.1` (server mode)、Router `192.168.{0,1,2}.2` (client)。server-0/1/2 で別 subnet |
 | mnet (ベンチターゲット) | `192.168.100.0/24` | mnet `192.168.100.1`、Server eth2 `192.168.100.2` |
 | 管理 | `192.168.50.0/24` | 専用 tap ブリッジ `mq-mgmt-br0` (Router .1 / Server .2 / Client .3 / mnet .4、VM 内にデフォルトルート無し) |
 
@@ -65,8 +65,8 @@ mnet / 上流へ出す。mnet 宛は NAT2 後に server VM の eth2 (mq-ext-br0)
 
 - **mogami-vm**: ルーター (DHCP/DNS/ファイアウォール/NAT/MQVPNクライアント)
 - **mogami-server**: MQVPN サーバー。**OCI イメージ (container/) を VM 内 docker で実行**
-  (トンネル終端 + NAT 2, `10.200.99.2:443` で待受)。ECMP で `mqvpn-server-0`/`mqvpn-server-1`
-  の 2 コンテナが独立 netns で動作。ルーターからはホスト(ISP シム)経由の経路で到達
+  (トンネル終端 + NAT 2, `10.200.99.2:443` で待受)。ECMP で `mqvpn-server-0`/`mqvpn-server-1`/`mqvpn-server-2`
+  の 3 コンテナが動作。ルーターからはホスト(ISP シム)経由の経路で到達
   (WAN ブリッジ mqvpn-srv-br0 には非隣接)。
 - **mogami-client**: 下流クライアント（DHCP で 172.16.0.x/12 を取得, GW/DNS 172.16.0.1）
 - **mogami-mnet**: 「実ネットワーク側」のベンチターゲット (192.168.100.1)。トンネル出口先。
@@ -78,14 +78,16 @@ VM ビルダーが `net.ifnames=0` を強制するためインターフェース
 | Interface | 役割 | 方式 |
 |-----------|------|------|
 | `eth0` | LAN (tap tr-mq → mqvpn-br0) | 172.16.0.1/12 固定 |
-| `eth1` | WAN0 (tap trw0 → mqvpn-srv-br0) | 10.200.0.2/24 固定 |
+| `eth1` | WAN0 (tap trw0 → mqvpn-srv-br0) | DHCP (`10.200.0.2/24`, GW `10.200.0.1`、MAC ピン留め) |
 | `eth2` | 管理 (tap tr-mgmt → mq-mgmt-br0) | 192.168.50.1/24 固定 (ルート無し) |
-| `eth3-13` | WAN1-11 (tap trw1-11 → mqvpn-srv-br0) | 10.200.0.3-13/24 固定 |
+| `eth3-13` | WAN1-11 (tap trw1-11 → mqvpn-srv-br0) | DHCP (`10.200.i.2/24`, GW `10.200.i.1`、MAC ピン留め) |
 
 注意点:
 - 管理はブリッジ `mq-mgmt-br0` (192.168.50.0/24) 経由。VM 内に mgmt のデフォルトルートは置かない
   (テスト経路の外への経路を構造的に持たない)。
 - WAN の tap NIC (`eth1`, `eth3-13`) はブリッジ `mqvpn-srv-br0` 経由でサーバー VM に接続する。
+- ISP シム DHCP (dnsmasq) は専用 netns (`mqvpn-isp`) で動作し、ホストの FW・設定には触れない。
+  後片付けは `ip netns delete` で完結する。
 
 ## 使い方
 
@@ -97,9 +99,8 @@ VM ビルダーが `net.ifnames=0` を強制するためインターフェース
 
 内部で以下を順次実行:
 1. 既存のラボを停止 (`stop-mogami-lab.sh`)
-2. 4 VM すべてをビルド (`build-mogami-lab.sh`)
-3. 3 ブリッジ (`mqvpn-br0` + `mqvpn-srv-br0` + `mq-ext-br0`) + tap インターフェースを作成
-4. 4 VM をバックグラウンドで起動（ログは `/tmp/mqvpn-{router,server,client,mnet}.log`）
+2. 5 ブリッジ + tap インターフェース + ISP シム DHCP (dnsmasq) を作成 (`build-mogami-lab.sh`)
+3. 4 VM すべてをビルドし、各 VM はビルド完了と同時にバックグラウンドで起動（ログは `/tmp/mqvpn-{router,server,client,mnet}.log`）
 
 終了するには `./test/stop-mogami-lab.sh` を実行する。
 

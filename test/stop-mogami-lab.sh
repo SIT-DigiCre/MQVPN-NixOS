@@ -5,6 +5,16 @@ echo "=== cleanup ==="
 for vm in mogami-vm mogami-server mogami-client mogami-mnet; do
   pkill -f "qemu-system-x86_64.*$vm" 2>/dev/null && echo "killed $vm VM" || true
 done
+if [ -f /tmp/mqvpn-dnsmasq.pid ]; then
+  sudo kill "$(cat /tmp/mqvpn-dnsmasq.pid)" 2>/dev/null && echo "killed lab dnsmasq" || true
+  for _ in {1..20}; do
+    sudo kill -0 "$(cat /tmp/mqvpn-dnsmasq.pid)" 2>/dev/null || break
+    sleep 0.1
+  done
+fi
+sudo rm -f /tmp/mqvpn-dnsmasq.pid /tmp/mqvpn-dnsmasq.leases /tmp/mqvpn-dnsmasq.log
+# ISP シム用 netns を消す (中の dnsmasq・veth ごと消える。残骸なし)
+sudo ip netns delete mqvpn-isp 2>/dev/null || true
 
 echo "=== removing server bridge + taps ==="
 for br in mqvpn-srv-br0 mqvpn-srv2-br0 mq-ext-br0 mq-mgmt-br0 mqvpn-br0; do
