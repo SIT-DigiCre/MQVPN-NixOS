@@ -42,8 +42,13 @@
         group = "kea";
         mode = "0755";
       }
+      {
+        directory = "/var/lib/chrony";
+        user = "chrony";
+        group = "chrony";
+        mode = "0755";
+      }
       "/etc/nixos"
-      "/etc/mqvpn"
     ];
     files = [
       "/etc/machine-id"
