@@ -1,4 +1,9 @@
-{ stdenv, fetchurl, autoPatchelfHook, libevent }:
+{
+  stdenv,
+  fetchurl,
+  autoPatchelfHook,
+  libevent,
+}:
 
 stdenv.mkDerivation rec {
   pname = "mqvpn-binary";

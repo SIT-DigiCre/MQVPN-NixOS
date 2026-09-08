@@ -1,24 +1,8 @@
 #!/usr/bin/env bash
-# =============================================================================
-# mqvpn ラボ ボトルネック一斉計測
+# mqvpnラボ ボトルネック一斉計測 (どこが詰まっているかを可視化)。
 #
-# 各ホップのスループット・CPU・netem 上限を、負荷中にサンプリングして
-# 「どこが詰まっているか」を可視化する。想定ボトルネック:
-#   - サーバー mqvpn-server のシングルスレッド CPU (doc: mqvpn-single-thread-cpu-bottleneck)
-#   - 各 WAN パスの netem 上限に対する利用率
-#   - ルーター mqvpn の CPU
-#   - トンネル (mqvpn0/mqvpn1) の実効スループット
-#
-# Usage:
-#   ./test/measure-bottlenecks.sh [duration_sec] [target_ip] [port]
-#     duration_sec : 負荷を流す秒数 (既定 20) — ウォームアップ後の計測窓
-#     target_ip    : iperf 宛先 (既定 192.168.100.1 = mnet)
-#     port         : iperf ポート (既定 6205)
-#     BENCH_WARMUP : 負荷だけ流して捨てる秒数 (既定 30)。
-#                    WLB 推定器 (est_bw 等) は分単位で収束するため、ここで
-#                    「推定器が整う前」を窓から除外する (= 負荷全体は WARMUP+DUR)。
-#                    収束確認: ./test/bench.sh wlbstate
-# =============================================================================
+# Usage: ./test/measure-bottlenecks.sh [duration_sec] [target_ip] [port]
+#   BENCH_WARMUP: 捨てる負荷秒数 (既定30)。WLB推定器の収束待ち (詳細はbench.sh参照)。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,8 +19,12 @@ ssh_mnet() { timeout 90 "$SCRIPT_DIR/ssh-mnet.sh" "$@"; }
 # --- iperfd を mnet に常駐 (bench.sh と同じ) ---
 ssh_mnet 'for p in '"$PORT"' $(seq 5201 5300); do ss -tln | grep -q ":$p " || iperf3 -s -p $p -D --logfile /tmp/i3-$p.log 2>/dev/null; done; echo ok' >/dev/null 2>&1 || true
 
-BLOG=/tmp/mb_bytes.log; SLOG=/tmp/mb_srv.log; RLOG=/tmp/mb_rtr.log
-: > "$BLOG"; : > "$SLOG"; : > "$RLOG"
+BLOG=/tmp/mb_bytes.log
+SLOG=/tmp/mb_srv.log
+RLOG=/tmp/mb_rtr.log
+: >"$BLOG"
+: >"$SLOG"
+: >"$RLOG"
 
 snap_bytes() { # eth1/3/4 + mqvpn0/1 の rx tx を 10 個出力
   ssh_rtr 'for d in eth1 eth3 eth4 mqvpn0 mqvpn1; do ip -s link show $d | awk "/RX:/{getline;printf \"%s \",\$1} /TX:/{getline;printf \"%s \",\$1}"; done; echo' 2>/dev/null | grep -vE "fetching|Warning:"
@@ -65,10 +53,10 @@ ssh_cli "iperf3 -c $TARGET -p $PORT -P 20 -R -t $((WARMUP + DUR)) --omit $WARMUP
 IPERF=$!
 
 sleep "$WARMUP"
-for ((i=0; i<DUR; i+=5)); do
-  echo "$(snap_bytes)" >> "$BLOG"
-  echo "$(snap_srv)"   >> "$SLOG"
-  echo "$(snap_rtr)"   >> "$RLOG"
+for ((i = 0; i < DUR; i += 5)); do
+  echo "$(snap_bytes)" >>"$BLOG"
+  echo "$(snap_srv)" >>"$SLOG"
+  echo "$(snap_rtr)" >>"$RLOG"
   sleep 5
 done
 wait "$IPERF" || true
@@ -78,21 +66,24 @@ echo "=== [result] aggregate throughput (client SUM receiver; avg over full iper
 ssh_cli "grep 'SUM.*receiver' /tmp/mb_iperf.txt 2>/dev/null" 2>&1 | grep -vE "fetching|Warning:" | tail -1
 
 # --- per-path / per-tunnel スループット ---
-read -r -a B0 <<< "$(head -1 "$BLOG")"
-read -r -a B1 <<< "$(tail -1 "$BLOG")"
+read -r -a B0 <<<"$(head -1 "$BLOG")"
+read -r -a B1 <<<"$(tail -1 "$BLOG")"
 pairs=(eth1:0,1 eth3:2,3 eth4:4,5 mqvpn0:6,7 mqvpn1:8,9)
 echo
 echo "=== [result] per-interface throughput (Mbps, window=$DUR s) ==="
 printf "  %-8s %10s %10s %12s\n" IFACE "rx+tx_Mbps" "ceiling" "util%"
 # ceiling 配列 (eth1/3/4 のみ) — 実測物理下り容量 (selection-vs-delivered.md 2026-08-28)
-declare -A CEIL=( [eth1]=217 [eth3]=175 [eth4]=107 )
+declare -A CEIL=([eth1]=217 [eth3]=175 [eth4]=107)
 total=0
 for p in "${pairs[@]}"; do
-  name="${p%%:*}"; idx="${p##*:}"; rx=${idx%,*}; tx=${idx#*,}
-  d=$(( (${B1[$tx]} + ${B1[$rx]}) - (${B0[$tx]} + ${B0[$rx]}) ))
-  mbps=$(( d * 8 / (DUR * 1000000) ))
+  name="${p%%:*}"
+  idx="${p##*:}"
+  rx=${idx%,*}
+  tx=${idx#*,}
+  d=$(((${B1[$tx]} + ${B1[$rx]}) - (${B0[$tx]} + ${B0[$rx]})))
+  mbps=$((d * 8 / (DUR * 1000000)))
   ceil="${CEIL[$name]:-NA}"
-  if [ "$ceil" != "NA" ]; then util=$(( mbps * 100 / ceil )); else util="NA"; fi
+  if [ "$ceil" != "NA" ]; then util=$((mbps * 100 / ceil)); else util="NA"; fi
   printf "  %-8s %10d %10s %11s%%\n" "$name" "$mbps" "$ceil" "$util"
   total=$((total + mbps))
 done

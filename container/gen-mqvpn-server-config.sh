@@ -1,13 +1,8 @@
 #!/usr/bin/env bash
-# gen-mqvpn-server-config.sh — MQVPN サーバー設定の自動生成
+# server.conf (JSON) +自己署名証明書+auth_keyを指定dirに生成する。
+# 生成物はcomposeがコンテナの/etc/mqvpnにマウントする前提。
 #
-# 自己署名証明書 (EC P-256) + 認証キー (auth_key) + server.conf (JSON) を
-# 指定ディレクトリに生成する。生成物は docker-compose がコンテナの /etc/mqvpn
-# にマウントする前提 (container/docker-compose.yml の ./mqvpn-server-conf)。
-#
-# 使い方:
-#   bash gen-mqvpn-server-config.sh [出力ディレクトリ]
-#   既定: ./mqvpn-server-conf
+# Usage: bash gen-mqvpn-server-config.sh [出力dir] (既定: ./mqvpn-server-conf)
 
 set -euo pipefail
 
@@ -29,20 +24,19 @@ openssl req -new -x509 -key "$CONF_DIR/server.key" -out "$CONF_DIR/server.crt" \
   -days 3650 -subj "/CN=$CN" \
   -addext "subjectAltName=DNS:$CN,IP:127.0.0.1"
 
-# 認証キー: クライアントと共有するため、mqvpn-auth.json にあればそれを流用し、
-# 無ければ生成して mqvpn-auth.json に書き出す (server/client で一致させる)
+# 認証キー: mqvpn-auth.jsonにあれば流用、無ければ生成して書き出す (server/client一致用)。
 AUTH_JSON="${SCRIPT_DIR}/../mqvpn-auth.json"
 if [ -f "$AUTH_JSON" ]; then
   AUTH_KEY=$(jq -r '.auth_key' "$AUTH_JSON")
 fi
 if [ -z "${AUTH_KEY:-}" ] || [ "$AUTH_KEY" = "null" ]; then
   AUTH_KEY=$(head -c 32 /dev/urandom | base64 | tr -d '\n')
-  echo "{\"server_addr\": \"\", \"auth_key\": \"$AUTH_KEY\"}" > "$AUTH_JSON"
+  echo "{\"server_addr\": \"\", \"auth_key\": \"$AUTH_KEY\"}" >"$AUTH_JSON"
   echo "Wrote new auth_key to $AUTH_JSON"
 fi
 
-# server.conf (JSON)。コンテナ内では /etc/mqvpn にマウントされる前提。
-cat > "$CONF_DIR/server.conf" <<EOF
+# server.conf (JSON。マウント前提は冒頭参照)。
+cat >"$CONF_DIR/server.conf" <<EOF
 {
   "control_listen": "127.0.0.1:9090",
   "mode": "server",

@@ -35,7 +35,6 @@ in
   ];
   system.stateVersion = "26.05";
 
-  # リポジトリ全体をシステムに配置
   systemd.tmpfiles.rules = [
     "C /home/digicre/mqvpn-router 0755 digicre users - ${./..}"
     "Z /home/digicre/mqvpn-router/.git 0755 digicre users - -"
@@ -53,12 +52,10 @@ in
     ];
   };
 
-  # 全WAN NICをまとめて監視するエイリアス
   programs.bash.shellAliases = {
     live-chart = "live_chart -i '${lib.concatStringsSep "," config.services.mqvpn.interfaces}'";
   };
 
-  # sudo（wheelはパスワード不要）
   security.sudo.wheelNeedsPassword = false;
 
   services.openssh = {
@@ -87,21 +84,4 @@ in
 
   time.timeZone = "Asia/Tokyo";
   console.keyMap = "jp106";
-
-  # i18n.defaultLocale = "ja_JP.UTF-8";
-  # fonts = {
-  #   fontconfig.enable = true;
-  #   packages = [
-  #     pkgs.noto-fonts-cjk-sans
-  #   ];
-  # };
-  # hardware.graphics.enable = true;
-  # services.kmscon = {
-  #   enable = true;
-  #   # hwRender = true;
-  #   config = {
-  #     font-name = "Noto Sans Mono CJK JP";
-  #     font-size = 14;
-  #   };
-  # };
 }

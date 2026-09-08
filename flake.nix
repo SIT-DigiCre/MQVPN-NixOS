@@ -16,7 +16,14 @@
   };
 
   outputs =
-    { self, nixpkgs, disko, impermanence, nix-index-database, ... }:
+    {
+      self,
+      nixpkgs,
+      disko,
+      impermanence,
+      nix-index-database,
+      ...
+    }:
     let
       inherit (nixpkgs) lib;
 
@@ -26,7 +33,19 @@
       ];
     in
     {
-      formatter.x86_64-linux = nixpkgs.legacyPackages.x86_64-linux.nixpkgs-fmt;
+      formatter.x86_64-linux =
+        let
+          pkgs = nixpkgs.legacyPackages.x86_64-linux;
+        in
+        pkgs.writeShellApplication {
+          name = "fmt";
+          runtimeInputs = with pkgs; [
+            treefmt
+            nixfmt
+            shfmt
+          ];
+          text = ''exec treefmt "$@"'';
+        };
 
       packages.x86_64-linux =
         let
@@ -34,10 +53,7 @@
           mqvpnServerOci = import ./container/mqvpn-server-image.nix { inherit pkgs; };
           mqvpnPrometheusOci = import ./container/mqvpn-prometheus-image.nix { inherit pkgs; };
           mqvpnGrafanaOci = import ./container/mqvpn-grafana-image.nix { inherit pkgs; };
-          # 3 イメージを 1 つのバンドルにまとめる (ビルド/ロードを 1 コマンドに)。
-          # 出力ディレクトリに各 tar への symlink と、docker load 一括スクリプトを置く。
-          # compose も同梱する (image と版本を一致させるため。実機では
-          # result/docker-compose.yml を container/ にコピーして使う)。
+          # 3イメージを1バンドル化 (ビルド/loadを1コマンドに。compose同梱で版本一致)。
           mqvpnComposeFile = pkgs.callPackage ./container/mqvpn-compose-file.nix { };
           mqvpnOciBundle = pkgs.runCommand "mqvpn-oci-bundle" { } ''
             mkdir -p $out
@@ -67,7 +83,7 @@
             "${nixpkgs}/nixos/modules/installer/cd-dvd/installation-cd-minimal.nix"
             {
               image.baseName = lib.mkForce "mqvpn-router";
-              # 試験の効率を上げるために、より軽量(低圧縮率)なアルゴリズムにしておく
+              # 試験効率のため軽量圧縮。
               isoImage.squashfsCompression = "lz4";
               isoImage = {
                 makeEfiBootable = true;
@@ -76,25 +92,24 @@
 
               zramSwap.enable = true;
 
-              # インストール対象のシステムを事前ビルドしてISOに含める（インストール時の負荷軽減）
+              # 導入対象を事前ビルドして同梱 (インストール時の負荷軽減)。
               system.extraDependencies = [
                 self.nixosConfigurations.mogami.config.system.build.toplevel
               ];
 
-               # リポジトリ全体をライブ環境にコピー
-               systemd.tmpfiles.rules = [
-                 "C /home/nixos/mqvpn-router 0755 nixos users - ${./.}"
-                 "C /home/nixos/install-router.sh 0755 nixos users - ${./install-router.sh}"
-               ];
+              systemd.tmpfiles.rules = [
+                "C /home/nixos/mqvpn-router 0755 nixos users - ${./.}"
+                "C /home/nixos/install-router.sh 0755 nixos users - ${./install-router.sh}"
+              ];
 
-              # インストーラー環境にdisko-installコマンドをプリインストール
               environment.systemPackages = [
                 disko.packages.x86_64-linux.disko-install
               ];
 
               console.keyMap = "jp106";
             }
-          ] ++ commonModules;
+          ]
+          ++ commonModules;
         };
         mogami = nixpkgs.lib.nixosSystem {
           system = "x86_64-linux";
@@ -104,32 +119,37 @@
             impermanence.nixosModules.impermanence
             ./persistence.nix
             ./router
-          ] ++ commonModules;
+          ]
+          ++ commonModules;
         };
         mogami-vm = nixpkgs.lib.nixosSystem {
           system = "x86_64-linux";
           modules = [
             ./router
             ./test/mogami-vm.nix
-          ] ++ commonModules;
+          ]
+          ++ commonModules;
         };
         mogami-client = nixpkgs.lib.nixosSystem {
           system = "x86_64-linux";
           modules = [
             ./test/mogami-client.nix
-          ] ++ commonModules;
+          ]
+          ++ commonModules;
         };
         mogami-server = nixpkgs.lib.nixosSystem {
           system = "x86_64-linux";
           modules = [
             ./test/mogami-server.nix
-          ] ++ commonModules;
+          ]
+          ++ commonModules;
         };
         mogami-mnet = nixpkgs.lib.nixosSystem {
           system = "x86_64-linux";
           modules = [
             ./test/mogami-mnet.nix
-          ] ++ commonModules;
+          ]
+          ++ commonModules;
         };
       };
     };

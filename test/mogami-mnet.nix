@@ -3,10 +3,7 @@
   pkgs,
   ...
 }:
-# "実ネットワーク側" の VM (ベンチターゲット): サーバーのトンネル出口先。
-# 専用サブネット (192.168.100.0/24) は他 VM のどの経路にも含まれないため、
-# クライアント→トンネル→コンテナ NAT→server VM eth2→ここ、の
-# フルチェーンを漏れなく測定できる。
+# ベンチターゲットVM: クライアント→トンネル→NAT→server eth2→ここのフルチェーンを測定。
 {
   imports = [ ./test-base.nix ];
 
@@ -14,8 +11,8 @@
 
   networking.useDHCP = false;
 
-  # eth0: tap tm-ext → mq-ext-br0 → server VM (eth2, 192.168.100.2)
   networking.interfaces.eth0 = {
+    # tap tm-ext → server VM (192.168.100.2)
     useDHCP = false;
     ipv4.addresses = [
       {
@@ -25,8 +22,8 @@
     ];
   };
 
-  # eth1: tap tm-mgmt → mq-mgmt-br0 (SSH 管理用)
   networking.interfaces.eth1 = {
+    # tap tm-mgmt (SSH管理用)
     useDHCP = false;
     ipv4.addresses = [
       {

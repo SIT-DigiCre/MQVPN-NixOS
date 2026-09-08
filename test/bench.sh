@@ -52,10 +52,6 @@ set -euo pipefail
 #       するためシンボル注釈はバイナリ側に無い — 集計は [kernel]/[.] 単位)
 #       注意: perf の CPU 集計は dmesg/perf 権限が要るので sudo 使用 (サーバー側)
 #
-#   ./test/bench.sh wlbstate
-#       直近の WLB round_start ログ (est_bw/pin_count 時系列) を両端から表示。
-#       推定器の収束確認用: 計測前にこれで est_bw が安定していることを目視確認する。
-#
 #   計測の前提 (WLB 推定器の収束):
 #     - do_measure / do_latab は BENCH_WARMUP 秒 (既定 20, 環境変数で調整) の
 #       負荷ウォームアップ後にのみ計測窓を置く。iperf3 --omit でレポートも除外。
@@ -72,8 +68,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 HELLO_CMD="latency|hetero|collapse3|collapse3_asym|latab|uneven|measure|multistream|profile|stagger|wlbstate|clean"
-[ $# -ge 1 ] || { echo "usage: $0 <$HELLO_CMD> [...]"; exit 1; }
-CMD="$1"; shift || true
+[ $# -ge 1 ] || {
+  echo "usage: $0 <$HELLO_CMD> [...]"
+  exit 1
+}
+CMD="$1"
+shift || true
 
 # --- SSH ヘルパ (ssh-*.sh は nix shell で sshpass を用意する) ---
 ssh_srv() { "$SCRIPT_DIR/ssh-server.sh" "$@"; }
@@ -83,7 +83,8 @@ ssh_cli() { "$SCRIPT_DIR/ssh-client.sh" "$@"; }
 # --- サンプラ等の配送 ---
 ship_common() {
   local samp
-  samp=$(cat << 'SAMP'
+  samp=$(
+    cat <<'SAMP'
 #!/usr/bin/env bash
 # サーバーは OCI コンテナ (ECMP で複数) — mqvpn プロセスを全 PID 合算する。
 # ホストの /proc にはコンテナプロセスも見えるため pgrep はホスト側で足りる。
@@ -112,14 +113,15 @@ while [ "$i" -lt "${1:-30}" ]; do
   prev_st=$st
 done
 SAMP
-)
+  )
   printf '%s\n' "$samp" | ssh_srv 'cat > /tmp/cpusamp.sh && chmod +x /tmp/cpusamp.sh' >/dev/null 2>&1 || true
   printf '%s\n' "$samp" | ssh_rtr 'cat > /tmp/cpusamp.sh && chmod +x /tmp/cpusamp.sh' >/dev/null 2>&1 || true
 
   # 生コアごとの busy% サンプラ (ウィンドウ内最大)。Linux CFS が mqvpn インスタンス
   # (各実質シングルスレッド) を別 vCPU に振り分けているかを可視化するため。
   local coresamp
-  coresamp=$(cat << 'CORESAMP'
+  coresamp=$(
+    cat <<'CORESAMP'
 #!/usr/bin/env bash
 # per-core busy% sampler (max over window). /proc/stat の cpuN から
 # (total - idle - iowait) / total を 1s ごとに計算し、各コアの最大を出力。
@@ -154,7 +156,7 @@ while [ "$i" -lt "$DUR" ]; do
   echo
 done
 CORESAMP
-)
+  )
   printf '%s\n' "$coresamp" | ssh_srv 'cat > /tmp/cpucore.sh && chmod +x /tmp/cpucore.sh' >/dev/null 2>&1 || true
   printf '%s\n' "$coresamp" | ssh_rtr 'cat > /tmp/cpucore.sh && chmod +x /tmp/cpucore.sh' >/dev/null 2>&1 || true
 }
@@ -163,7 +165,10 @@ CORESAMP
 # WAN NIC 一覧の唯一の情報源は mogami-vm の services.mqvpn.interfaces。
 # flake から導出して同期ずれを防ぐ。
 rtr_wan=($(nix eval --json "path:$(cd "$SCRIPT_DIR/.." && pwd)#nixosConfigurations.mogami-vm.config.services.mqvpn.interfaces" 2>/dev/null | nix shell nixpkgs#jq --command jq -r '.[]' 2>/dev/null || true))
-[ "${#rtr_wan[@]}" -gt 0 ] || { echo "ERROR: WAN NIC 一覧を flake から取得できない" >&2; exit 1; }
+[ "${#rtr_wan[@]}" -gt 0 ] || {
+  echo "ERROR: WAN NIC 一覧を flake から取得できない" >&2
+  exit 1
+}
 
 clear_netem() {
   ssh_rtr "for i in ${rtr_wan[*]}; do sudo -n tc qdisc del dev \$i root 2>/dev/null || true; done; echo netem-cleared" 2>/dev/null || true
@@ -177,12 +182,13 @@ host_wan=(trw0 trw1 trw2)
 
 # --- 実測物理回線モデル (selection-vs-delivered.md 2026-08-28 強制出口 n=5) ---
 # 下り容量平均 Mbps (rate は固定値)。RTT は実測 min/max を jitter で変動。
-declare -A RATE_MEAN=( [eth1]=217 [eth3]=175 [eth4]=107 )
+declare -A RATE_MEAN=([eth1]=217 [eth3]=175 [eth4]=107)
 # 各 WAN の netem delay 指定 (apply_* が上書き)。RTT 変動(jitter+distribution)を保持。
-declare -A DELAY_SPEC=( [eth1]="delay 12ms 3ms distribution normal" [eth3]="delay 11ms 4ms distribution normal" [eth4]="delay 12ms 6ms distribution pareto" )
+declare -A DELAY_SPEC=([eth1]="delay 12ms 3ms distribution normal" [eth3]="delay 11ms 4ms distribution normal" [eth4]="delay 12ms 6ms distribution pareto")
 
 clear_netem_host() {
-  for t in "${host_wan[@]}"; do sudo -n tc qdisc del dev "$t" root 2>/dev/null || true; done; echo netem-cleared-host
+  for t in "${host_wan[@]}"; do sudo -n tc qdisc del dev "$t" root 2>/dev/null || true; done
+  echo netem-cleared-host
 }
 # 12種のapply_*を1表に統一。router+host両方に同specを適用する。
 # collapse3_asymのみ非対称: router=上り36/37/20M, host=下り217/175/107M (従来通り)。
@@ -193,22 +199,35 @@ apply_netem() { # $1=uniform|hetero|collapse3|collapse3_asym|latab|uneven [$2=ms
     uniform) for w in "${rtr_wan[@]}"; do specs+=("delay ${ms}ms limit 100000"); done ;;
     hetero) for i in "${!rtr_wan[@]}"; do if [ "$i" -lt 5 ]; then specs+=("delay 45ms 12ms loss 1% limit 100000"); elif [ "$i" -lt 10 ]; then specs+=("delay 75ms 25ms loss 0.5% limit 100000"); else specs+=("delay 15ms 4ms loss 0.2% limit 100000"); fi; done ;;
     collapse3)
-      DELAY_SPEC[eth1]="delay 12ms 3ms distribution normal"; DELAY_SPEC[eth3]="delay 11ms 4ms distribution normal"; DELAY_SPEC[eth4]="delay 12ms 6ms distribution pareto"
-      for w in "${rtr_wan[@]}"; do specs+=("${DELAY_SPEC[$w]} rate ${RATE_MEAN[$w]}mbit limit 100000"); done ;;
+      DELAY_SPEC[eth1]="delay 12ms 3ms distribution normal"
+      DELAY_SPEC[eth3]="delay 11ms 4ms distribution normal"
+      DELAY_SPEC[eth4]="delay 12ms 6ms distribution pareto"
+      for w in "${rtr_wan[@]}"; do specs+=("${DELAY_SPEC[$w]} rate ${RATE_MEAN[$w]}mbit limit 100000"); done
+      ;;
     collapse3_asym)
-      DELAY_SPEC[eth1]="delay 12ms 3ms distribution normal"; DELAY_SPEC[eth3]="delay 11ms 4ms distribution normal"; DELAY_SPEC[eth4]="delay 12ms 6ms distribution pareto"
-      declare -A RATE_UP=( [eth1]=36 [eth3]=37 [eth4]=20 )
-      for w in "${rtr_wan[@]}"; do specs+=("${DELAY_SPEC[$w]} rate ${RATE_UP[$w]}mbit limit 100000"); hspecs+=("${DELAY_SPEC[$w]} rate ${RATE_MEAN[$w]}mbit limit 100000"); done ;;
+      DELAY_SPEC[eth1]="delay 12ms 3ms distribution normal"
+      DELAY_SPEC[eth3]="delay 11ms 4ms distribution normal"
+      DELAY_SPEC[eth4]="delay 12ms 6ms distribution pareto"
+      declare -A RATE_UP=([eth1]=36 [eth3]=37 [eth4]=20)
+      for w in "${rtr_wan[@]}"; do
+        specs+=("${DELAY_SPEC[$w]} rate ${RATE_UP[$w]}mbit limit 100000")
+        hspecs+=("${DELAY_SPEC[$w]} rate ${RATE_MEAN[$w]}mbit limit 100000")
+      done
+      ;;
     latab)
-      DELAY_SPEC[eth1]="delay 10ms"; DELAY_SPEC[eth3]="delay 200ms"; DELAY_SPEC[eth4]="delay 50ms"
-      for w in "${rtr_wan[@]}"; do specs+=("${DELAY_SPEC[$w]} rate ${RATE_MEAN[$w]}mbit limit 100000"); done ;;
+      DELAY_SPEC[eth1]="delay 10ms"
+      DELAY_SPEC[eth3]="delay 200ms"
+      DELAY_SPEC[eth4]="delay 50ms"
+      for w in "${rtr_wan[@]}"; do specs+=("${DELAY_SPEC[$w]} rate ${RATE_MEAN[$w]}mbit limit 100000"); done
+      ;;
     uneven) specs=("delay 10ms rate 200mbit limit 100000" "delay 200ms rate 600mbit limit 100000" "delay 50ms rate 300mbit limit 100000") ;;
   esac
   [ "${#hspecs[@]}" -eq 0 ] && hspecs=("${specs[@]}")
   local cmd=""
   for i in "${!rtr_wan[@]}"; do cmd+="sudo -n tc qdisc replace dev ${rtr_wan[$i]} root netem ${specs[$i]};"; done
   ssh_rtr "$cmd echo applied" 2>/dev/null
-  for i in "${!host_wan[@]}"; do sudo -n tc qdisc replace dev "${host_wan[$i]}" root netem ${hspecs[$i]}; done; echo applied-host
+  for i in "${!host_wan[@]}"; do sudo -n tc qdisc replace dev "${host_wan[$i]}" root netem ${hspecs[$i]}; done
+  echo applied-host
 }
 
 # === iperf3 ===
@@ -267,9 +286,15 @@ ensure_iperfd_mnet() {
 rx_bytes() { # $1=iface
   ssh_rtr "ip -s link show $1 2>/dev/null | awk '/RX:/{getline;print \$1}'" 2>/dev/null | grep -E '^[0-9]+$' | tail -1
 }
-measure_preamble() { ensure_iperfd_mnet; ensure_rmem; ensure_wmem_mnet; ship_common; }
+measure_preamble() {
+  ensure_iperfd_mnet
+  ensure_rmem
+  ensure_wmem_mnet
+  ship_common
+}
 fetch_ceil() { # $1=assoc名: 各WANのnetem ceilingをtcから取得
-  local -n _C=$1; local w c
+  local -n _C=$1
+  local w c
   for w in "${rtr_wan[@]}"; do
     c=$(ssh_rtr "tc qdisc show dev $w 2>/dev/null | grep -o 'rate [0-9]*Mbit' | grep -o '[0-9]*' || true" 2>/dev/null | tail -1)
     _C[$w]=${c:-0}
@@ -308,34 +333,50 @@ wlb_rates_of() { # $1=raw_snap_a $2=raw_snap_b
 wait_wlb_steady() {
   local min=${1:-60} max=${2:-120} pct=${BENCH_STEADY_PCT:-15}
   local t0=$SECONDS prev_raw="" prev_rates="" cur_raw cur_rates stable=0 used=$max
-  while [ $(( SECONDS - t0 )) -lt "$max" ]; do
+  while [ $((SECONDS - t0)) -lt "$max" ]; do
     cur_raw=$(wlb_snap)
     if [ -n "$prev_raw" ] && [ "$prev_raw" != "$cur_raw" ]; then
       cur_rates=$(wlb_rates_of "$prev_raw" "$cur_raw")
       if [ -n "$prev_rates" ] && rates_stable "$prev_rates" "$cur_rates" "$pct"; then
-        stable=$((stable+1))
-        if [ "$stable" -ge 2 ] && [ $(( SECONDS - t0 )) -ge "$min" ]; then used=$(( SECONDS - t0 )); break; fi
+        stable=$((stable + 1))
+        if [ "$stable" -ge 2 ] && [ $((SECONDS - t0)) -ge "$min" ]; then
+          used=$((SECONDS - t0))
+          break
+        fi
       else stable=0; fi
       prev_rates="$cur_rates"
     fi
     prev_raw="$cur_raw"
     sleep 5
   done
-  [ $(( SECONDS - t0 )) -lt "$min" ] && used=$min
+  [ $((SECONDS - t0)) -lt "$min" ] && used=$min
   echo "$used"
 }
 
 # 公平性指標: FAIR_JAIN (Jain) / FAIR_CPRMSE (容量比例 RMSE %) をセット
 #   $1=mbps(indexed) $2=ceil(indexed) $3=total
 compute_fairness() {
-  local -n _M=$1 _C=$2; local total=$3
+  local -n _M=$1 _C=$2
+  local total=$3
   local sum=0 sumsq=0 n=0 sceil=0 x i
-  for i in "${!_M[@]}"; do x=${_M[i]:-0}; sum=$((sum+x)); sumsq=$((sumsq+x*x)); n=$((n+1)); sceil=$((sceil+${_C[i]:-0})); done
-  FAIR_JAIN=0; [ "$sumsq" -gt 0 ] && FAIR_JAIN=$(awk "BEGIN{printf \"%.4f\",($sum*$sum)/($n*$sumsq)}")
+  for i in "${!_M[@]}"; do
+    x=${_M[i]:-0}
+    sum=$((sum + x))
+    sumsq=$((sumsq + x * x))
+    n=$((n + 1))
+    sceil=$((sceil + ${_C[i]:-0}))
+  done
+  FAIR_JAIN=0
+  [ "$sumsq" -gt 0 ] && FAIR_JAIN=$(awk "BEGIN{printf \"%.4f\",($sum*$sum)/($n*$sumsq)}")
   FAIR_CPRMSE=null
   if [ "$sceil" -gt 0 ] && [ "$total" -gt 0 ]; then
     local se=0 i
-    for i in "${!_M[@]}"; do local ideal=$(( total * ${_C[i]:-0} / sceil )); local e=$(( ${_M[i]:-0} - ideal )); [ "$e" -lt 0 ] && e=$(( -e )); se=$(( se + e*e )); done
+    for i in "${!_M[@]}"; do
+      local ideal=$((total * ${_C[i]:-0} / sceil))
+      local e=$((${_M[i]:-0} - ideal))
+      [ "$e" -lt 0 ] && e=$((-e))
+      se=$((se + e * e))
+    done
     FAIR_CPRMSE=$(awk "BEGIN{printf \"%.1f\",sqrt($se)/$total*100}")
   fi
 }
@@ -350,13 +391,13 @@ emit_bench_json() {
   compute_fairness "$mn" "$cn" "$total"
   local pj="" i=0 p util
   for p in $paths; do
-    if [ "${C[i]:-0}" = 0 ]; then util=null; else util=$(( ${M[i]:-0} * 100 / ${C[i]:-0} )); fi
+    if [ "${C[i]:-0}" = 0 ]; then util=null; else util=$((${M[i]:-0} * 100 / ${C[i]:-0})); fi
     [ -n "$pj" ] && pj="$pj,"
     pj="$pj{\"iface\":\"$p\",\"mbps\":${M[i]:-0},\"ceil\":${C[i]:-0},\"util\":$util}"
-    i=$((i+1))
+    i=$((i + 1))
   done
   printf '{"ts":"%s","cmd":"%s","label":"%s","warmup_used":%s,"total_mbps":%s,"fairness_jain":%s,"cap_prop_rmse_pct":%s,"paths":[%s]}\n' \
-    "$(date -u +%FT%TZ)" "$cmd" "$label" "$wu" "$total" "$FAIR_JAIN" "$FAIR_CPRMSE" "$pj" >> "$f"
+    "$(date -u +%FT%TZ)" "$cmd" "$label" "$wu" "$total" "$FAIR_JAIN" "$FAIR_CPRMSE" "$pj" >>"$f"
 }
 
 # 計測の正しさ (chiken 議論の反映):
@@ -382,14 +423,15 @@ measure_once() {
   local flag="" uflag=""
   local adaptive=0
   [ "${BENCH_ADAPTIVE_WARMUP:-1}" != "0" ] && adaptive=1
-    local warmup_max="${BENCH_WARMUP_MAX:-45}"
-  [ "$warmup_max" -lt "$warmup" ] && warmup_max=$(( warmup + 30 ))
+  local warmup_max="${BENCH_WARMUP_MAX:-45}"
+  [ "$warmup_max" -lt "$warmup" ] && warmup_max=$((warmup + 30))
   [ "$dir" = "down" ] && flag="-R"
   [ "$proto" = "udp" ] && uflag="-u"
   measure_preamble
 
   # 各 WAN の netem ceiling (Mbit) を tc から動的取得
-  declare -A CEIL; fetch_ceil CEIL
+  declare -A CEIL
+  fetch_ceil CEIL
 
   # 負荷を流しつつ定常窓を計測。単一フロー(P=1)ではウォームアップ中に TCP コネクションが
   # リセットされると計測窓が 0 になる(フレーク)。TOTAL=0 の場合は再計測する。
@@ -399,7 +441,7 @@ measure_once() {
   local -a MBPS=() CEIL2=() B0=() B1=()
   while :; do
     attempt=$((attempt + 1))
-    local wp=$(( warmup_max + sec + 5 ))
+    local wp=$((warmup_max + sec + 5))
     samp_start "$((wp + 4))"
     ssh_cli "iperf3 -c $TARGET -p $PORT ${uflag} ${flag} -P $P -b ${rate}M -t $wp > /tmp/mb.txt 2>&1" &
     local IP=$!
@@ -412,18 +454,33 @@ measure_once() {
     fi
 
     # 定常窓 [B0 -> B1] のみで集計
-    B0=(); i=0
-    for w in "${rtr_wan[@]}"; do B0[$i]=$(rx_bytes "$w"); i=$((i + 1)); done
-    sleep "$sec"
-    B1=(); i=0
-    for w in "${rtr_wan[@]}"; do B1[$i]=$(rx_bytes "$w"); i=$((i + 1)); done
-    kill "$IP" 2>/dev/null; wait "$IP" 2>/dev/null || true
-
-    tot=0; MBPS=(); CEIL2=(); i=0
+    B0=()
+    i=0
     for w in "${rtr_wan[@]}"; do
-      mbps=$(( (B1[i] - B0[i]) * 8 / (sec * 1000000) ))
+      B0[$i]=$(rx_bytes "$w")
+      i=$((i + 1))
+    done
+    sleep "$sec"
+    B1=()
+    i=0
+    for w in "${rtr_wan[@]}"; do
+      B1[$i]=$(rx_bytes "$w")
+      i=$((i + 1))
+    done
+    kill "$IP" 2>/dev/null
+    wait "$IP" 2>/dev/null || true
+
+    tot=0
+    MBPS=()
+    CEIL2=()
+    i=0
+    for w in "${rtr_wan[@]}"; do
+      mbps=$(((B1[i] - B0[i]) * 8 / (sec * 1000000)))
       ceil=${CEIL[$w]}
-      tot=$((tot + mbps)); MBPS[i]=$mbps; CEIL2[i]=$ceil; i=$((i + 1))
+      tot=$((tot + mbps))
+      MBPS[i]=$mbps
+      CEIL2[i]=$ceil
+      i=$((i + 1))
     done
 
     if [ "$tot" -gt 0 ] || [ "$attempt" -ge "$max_attempts" ]; then break; fi
@@ -433,8 +490,9 @@ measure_once() {
   echo "== $proto P=$P $dir @ ${sec}s steady (after ${w_used}s warmup; WAN: ${rtr_wan[*]}) =="
   i=0
   for w in "${rtr_wan[@]}"; do
-    mbps=${MBPS[i]}; ceil=${CEIL[$w]}
-    if [ "$ceil" = 0 ]; then util="NA"; else util=$(( mbps * 100 / ceil )); fi
+    mbps=${MBPS[i]}
+    ceil=${CEIL[$w]}
+    if [ "$ceil" = 0 ]; then util="NA"; else util=$((mbps * 100 / ceil)); fi
     printf "  %-6s %8d Mbps  ceil %sM  util %s%%\n" "$w" "$mbps" "$ceil" "$util"
     i=$((i + 1))
   done
@@ -458,12 +516,11 @@ do_measure() {
     t=$(printf '%s\n' "$out" | grep -o 'TOTAL (tunnel-bound) = [0-9]*' | grep -o '[0-9]*$')
     [ -n "$t" ] && totals+=("$t")
   done
-    if [ "$runs" -gt 1 ]; then
+  if [ "$runs" -gt 1 ]; then
     echo "== summary over ${#totals[@]} runs (Mbps, steady-state) =="
     printf '%s\n' "${totals[@]}" | sort -n | awk '{a[NR]=$1} END{n=NR; if(n==0) exit; q1i=(int((n+1)/4)<1)?1:int((n+1)/4); q3i=(int(3*(n+1)/4)<1)?1:int(3*(n+1)/4); med=(n%2)?a[(n+1)/2]:((a[n/2]+a[n/2+1])/2); printf "  median=%d  IQR=[%d,%d]  min=%d max=%d\n", med, a[q1i], a[q3i], a[1], a[n]}'
   fi
 }
-
 
 # --- サーバー→クライアント実IP への戻りルートは intentionally 付けない ---
 # ルーター側 NAPT(MASQUERADE) のため復路宛先はトンネル端点(192.168.0.2)となり、
@@ -480,12 +537,13 @@ do_measure() {
 #   意図的に行わない (ピン決定はフロー開始瞬間に起き、開始位相の除外は測定対象の破壊)。
 do_stagger() {
   local N="${1:-20}" gap="${2:-1}" sec="${3:-15}" proto="${4:-tcp}" dir="${5:-down}"
-  local flag="" uflag="" win=$(( gap * (N - 1) + sec ))
+  local flag="" uflag="" win=$((gap * (N - 1) + sec))
   [ "$dir" = "down" ] && flag="-R"
   [ "$proto" = "udp" ] && uflag="-u"
   measure_preamble
 
-  declare -A CEIL; fetch_ceil CEIL
+  declare -A CEIL
+  fetch_ceil CEIL
   declare -A B0
   for w in "${rtr_wan[@]}"; do B0[$w]=$(rx_bytes "$w"); done
 
@@ -496,15 +554,16 @@ do_stagger() {
     ssh_cli "iperf3 -c $TARGET -p $p ${uflag} ${flag} -t $sec > /tmp/stg-$i.txt 2>&1" &
     sleep "$gap"
   done
-  sleep $((win + 2)); wait 2>/dev/null || true
+  sleep $((win + 2))
+  wait 2>/dev/null || true
 
   echo "== stagger $proto N=$N gap=${gap}s window=${win}s $dir =="
   local tot=0 w mbps ceil util B1
   for w in "${rtr_wan[@]}"; do
     B1=$(rx_bytes "$w")
-    mbps=$(( (${B1:-0} - ${B0[$w]:-0}) * 8 / (win * 1000000) ))
+    mbps=$(((${B1:-0} - ${B0[$w]:-0}) * 8 / (win * 1000000)))
     ceil=${CEIL[$w]}
-    if [ "$ceil" = 0 ]; then util="NA"; else util=$(( mbps * 100 / ceil )); fi
+    if [ "$ceil" = 0 ]; then util="NA"; else util=$((mbps * 100 / ceil)); fi
     printf "  %-6s %8d Mbps  ceil %sM  util %s%%\n" "$w" "$mbps" "$ceil" "$util"
     tot=$((tot + mbps))
   done
@@ -527,11 +586,12 @@ do_latab() {
   local label="${2:-latab}" warmup="${BENCH_WARMUP:-20}"
   local adaptive=0
   [ "${BENCH_ADAPTIVE_WARMUP:-1}" != "0" ] && adaptive=1
-    local warmup_max="${BENCH_WARMUP_MAX:-45}"
-  [ "$warmup_max" -lt "$warmup" ] && warmup_max=$(( warmup + 30 ))
-  local wp=$(( warmup_max + sec + 5 ))
+  local warmup_max="${BENCH_WARMUP_MAX:-45}"
+  [ "$warmup_max" -lt "$warmup" ] && warmup_max=$((warmup + 30))
+  local wp=$((warmup_max + sec + 5))
   measure_preamble
-  declare -A CEIL; fetch_ceil CEIL
+  declare -A CEIL
+  fetch_ceil CEIL
 
   samp_start "$((wp + 4))"
   ssh_cli "iperf3 -c $TARGET -p $PORT -R -P 20 -b 1200M -t $wp > /tmp/fill.txt 2>&1" &
@@ -547,7 +607,10 @@ do_latab() {
   # 定常窓 [B0 -> B1] のみで集計 (B1 は fill 終端で取る。jitter は別負荷なので混入させない)
   local -a B0=()
   local i=0 w
-  for w in "${rtr_wan[@]}"; do B0[$i]=$(rx_bytes "$w"); i=$((i + 1)); done
+  for w in "${rtr_wan[@]}"; do
+    B0[$i]=$(rx_bytes "$w")
+    i=$((i + 1))
+  done
 
   # トンネル RTT (負荷下) p50/p95/p99 — 生サンプルを受け取りローカルで集計
   local pings
@@ -557,7 +620,10 @@ do_latab() {
 
   local -a B1=()
   i=0
-  for w in "${rtr_wan[@]}"; do B1[$i]=$(rx_bytes "$w"); i=$((i + 1)); done
+  for w in "${rtr_wan[@]}"; do
+    B1[$i]=$(rx_bytes "$w")
+    i=$((i + 1))
+  done
   wait "$FILL" 2>/dev/null || true
 
   # 小パケット UDP jitter (負荷窓外だが「負荷下」近似として取得)
@@ -569,11 +635,14 @@ do_latab() {
   local -a MBPS=() CEIL2=()
   i=0
   for w in "${rtr_wan[@]}"; do
-    mbps=$(( (B1[i] - B0[i]) * 8 / (sec * 1000000) ))
+    mbps=$(((B1[i] - B0[i]) * 8 / (sec * 1000000)))
     ceil=${CEIL[$w]}
-    if [ "$ceil" = 0 ]; then util="NA"; else util=$(( mbps * 100 / ceil )); fi
+    if [ "$ceil" = 0 ]; then util="NA"; else util=$((mbps * 100 / ceil)); fi
     printf "  %-6s %8d Mbps  ceil %sM  util %s%%\n" "$w" "$mbps" "$ceil" "$util"
-    tot=$((tot + mbps)); MBPS[i]=$mbps; CEIL2[i]=$ceil; i=$((i + 1))
+    tot=$((tot + mbps))
+    MBPS[i]=$mbps
+    CEIL2[i]=$ceil
+    i=$((i + 1))
   done
   echo "  TOTAL (tunnel-bound) = ${tot} Mbps"
   compute_fairness MBPS CEIL2 "$tot"
@@ -610,23 +679,36 @@ case "$CMD" in
     ssh_srv 'sudo -n docker ps --filter name=mqvpn-server --format "{{.Names}}" | grep -q . && echo running || { sudo -n systemctl restart mqvpn-compose; sleep 3; echo restarted; }' 2>/dev/null | tail -1
     ;;
   latency)
-    MS="${1:-50}"; RATE="${2:-800}"; SEC="${3:-15}"; DIR="${4:-down}"
-    clear_netem; apply_netem uniform "$MS"; sleep 8
+    MS="${1:-50}"
+    RATE="${2:-800}"
+    SEC="${3:-15}"
+    DIR="${4:-down}"
+    clear_netem
+    apply_netem uniform "$MS"
+    sleep 8
     do_measure tcp 20 "$RATE" "$DIR" "$SEC"
     ;;
   hetero)
-    RATE="${1:-800}"; SEC="${2:-15}"; DIR="${3:-down}"
-    clear_netem; apply_netem hetero; sleep 8
+    RATE="${1:-800}"
+    SEC="${2:-15}"
+    DIR="${3:-down}"
+    clear_netem
+    apply_netem hetero
+    sleep 8
     do_measure tcp 20 "$RATE" "$DIR" "$SEC"
     ;;
   collapse3)
-    clear_netem; apply_netem collapse3; sleep 8
+    clear_netem
+    apply_netem collapse3
+    sleep 8
     do_measure tcp 1 1200 down 15
     do_measure tcp 20 1200 down 15
     do_measure udp 20 1500 down 15
     ;;
   collapse3_asym)
-    clear_netem; apply_netem collapse3_asym; sleep 8
+    clear_netem
+    apply_netem collapse3_asym
+    sleep 8
     echo "=== [collapse3_asym] DOWNSTREAM TESTS (host netem: 217M/175M/107M, rtr netem: 36M/37M/20M) ==="
     do_measure tcp 1 1200 down 15
     do_measure tcp 20 1200 down 15
@@ -637,28 +719,51 @@ case "$CMD" in
     do_measure udp 20 1500 up 15
     ;;
   latab)
-    clear_netem; apply_netem latab; sleep 8
+    clear_netem
+    apply_netem latab
+    sleep 8
     do_latab "${1:-15}" "latab (cap=collapse3 実測 217/175/107M; RTT eth1=10ms eth3=200ms eth4=50ms)"
     ;;
   uneven)
-    clear_netem; apply_netem uneven; sleep 8
+    clear_netem
+    apply_netem uneven
+    sleep 8
     do_latab "${1:-15}" "uneven (eth1=10ms/200M eth3=200ms/600M eth4=50ms/300M)"
     ;;
   measure)
-    PROTO="${1:-tcp}"; P="${2:-20}"; RATE="${3:-1200}"; DIR="${4:-down}"; SEC="${5:-15}"
+    PROTO="${1:-tcp}"
+    P="${2:-20}"
+    RATE="${3:-1200}"
+    DIR="${4:-down}"
+    SEC="${5:-15}"
     do_measure "$PROTO" "$P" "$RATE" "$DIR" "$SEC"
     ;;
   multistream)
-    N="${1:-10}"; SEC="${2:-20}"
-    ensure_iperfd_mnet; ensure_rmem; ensure_wmem_mnet; ship_common
+    N="${1:-10}"
+    SEC="${2:-20}"
+    ensure_iperfd_mnet
+    ensure_rmem
+    ensure_wmem_mnet
+    ship_common
     "$SCRIPT_DIR/repro-cpu-saturation.sh" "$N" "$SEC"
     ;;
   profile)
-    MS="${1:-50}"; RATE="${2:-800}"; SEC="${3:-15}"; DIR="${4:-down}"
-    ensure_iperfd_mnet; ensure_rmem; ensure_wmem_mnet; ship_common; clear_netem; apply_netem uniform "$MS"
+    MS="${1:-50}"
+    RATE="${2:-800}"
+    SEC="${3:-15}"
+    DIR="${4:-down}"
+    ensure_iperfd_mnet
+    ensure_rmem
+    ensure_wmem_mnet
+    ship_common
+    clear_netem
+    apply_netem uniform "$MS"
     sleep 8
     PERF=$(ssh_srv "command -v perf 2>/dev/null | tail -1")
-    [ -n "$PERF" ] || { echo "perf not found on server"; exit 1; }
+    [ -n "$PERF" ] || {
+      echo "perf not found on server"
+      exit 1
+    }
     PERFDATA=/tmp/perf.data
     # ECMP で複数コンテナに分散 → 全 mqvpn プロセスを対象に (ホスト perf は
     # コンテナプロセスへホスト PID でアタッチできる)
@@ -670,10 +775,14 @@ case "$CMD" in
     ssh_srv "sudo -n ${PERF} report -i ${PERFDATA} --stdio --sort symbol --no-child --percent-limit 2 2>&1 | grep -E '^ *[0-9.]+\%  \[\.\]' | head -12" 2>/dev/null | tail -12
     ;;
   stagger)
-    N="${1:-20}"; GAP="${2:-1}"; SEC="${3:-15}"; PROTO="${4:-tcp}"; DIR="${5:-down}"
+    N="${1:-20}"
+    GAP="${2:-1}"
+    SEC="${3:-15}"
+    PROTO="${4:-tcp}"
+    DIR="${5:-down}"
     do_stagger "$N" "$GAP" "$SEC" "$PROTO" "$DIR"
     ;;
-wlbstate)
+  wlbstate)
     # 推定器収束の目視確認: ルーター STATUS ログの per-path 実測レートを
     # 2 点観測の差分 (tx+rx → Mbps) で表示。値が安定すればスケジューラの
     # 分配が現ネットワークに収束したとみなして計測を開始する。
@@ -696,6 +805,7 @@ wlbstate)
     fi
     ;;
   *)
-    echo "unknown: $CMD (use: $HELLO_CMD)"; exit 1;
+    echo "unknown: $CMD (use: $HELLO_CMD)"
+    exit 1
     ;;
 esac

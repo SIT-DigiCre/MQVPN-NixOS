@@ -35,19 +35,26 @@
                   "-L"
                   "nixos_root"
                 ];
-                subvolumes = let btrfsOpts = [ "compress-force=zstd" "noatime" ]; in {
-                  "root" = {
-                    mountpoint = "/";
+                subvolumes =
+                  let
+                    btrfsOpts = [
+                      "compress-force=zstd"
+                      "noatime"
+                    ];
+                  in
+                  {
+                    "root" = {
+                      mountpoint = "/";
+                    };
+                    "nix" = {
+                      mountpoint = "/nix";
+                      mountOptions = btrfsOpts;
+                    };
+                    "persist" = {
+                      mountpoint = "/persist";
+                      mountOptions = btrfsOpts;
+                    };
                   };
-                  "nix" = {
-                    mountpoint = "/nix";
-                    mountOptions = btrfsOpts;
-                  };
-                  "persist" = {
-                    mountpoint = "/persist";
-                    mountOptions = btrfsOpts;
-                  };
-                };
               };
             };
           };

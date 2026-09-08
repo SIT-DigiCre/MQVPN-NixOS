@@ -1,7 +1,5 @@
 {
-  # ---------------------------------------------------------------------
-  # Ephemeral Root (Impermanence) & Btrfs Rollback
-  # ---------------------------------------------------------------------
+  # Ephemeral root (impermanence + btrfs rollback)
   boot.initrd.systemd.enable = true;
 
   boot.initrd.systemd.services.rollback = {

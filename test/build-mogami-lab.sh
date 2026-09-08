@@ -8,8 +8,15 @@ BRIDGE=mqvpn-br0
 TAP_ROUTER=tr-mq
 TAP_CLIENT=tc-mq
 WAN_TAPS=(trw{0..11})
-mkbridge() { sudo ip link add "$1" type bridge; sudo ip link set "$1" up; }
-mktap() { sudo ip tuntap add "$1" mode tap user "$USER"; sudo ip link set "$1" master "$2"; sudo ip link set "$1" up; }
+mkbridge() {
+  sudo ip link add "$1" type bridge
+  sudo ip link set "$1" up
+}
+mktap() {
+  sudo ip tuntap add "$1" mode tap user "$USER"
+  sudo ip link set "$1" master "$2"
+  sudo ip link set "$1" up
+}
 
 setup_network() {
   echo "=== cleanup stale interfaces ==="
@@ -30,9 +37,7 @@ setup_network() {
     mktap "$tap" mqvpn-srv-br0
     echo "  $tap -> mqvpn-srv-br0"
   done
-  # 各 WAN 用ゲートウェイをホストが保持 (10.200.i.1/24) し、ISP シムの DHCP
-  # (dnsmasq) でルーター WAN NIC に 10.200.i.2 + GW を配布する
-  # → 本番の「WAN は DHCP で ISP 経由」と同形状。
+  # GWはホストが保持しdnsmasqで配布 (本番「WANはDHCPでISP経由」と同形状)。
   for i in {0..11}; do
     sudo ip addr add "10.200.$i.1/24" dev mqvpn-srv-br0 2>/dev/null || true
   done
@@ -63,12 +68,8 @@ setup_network() {
     mktap "$tap" mq-mgmt-br0
     echo "  $tap -> mq-mgmt-br0"
   done
-  # サーバー (トンネル集約点) だけが上流へ抜けられる: forwarding + SNAT
-  # 双方向とも -I (先頭挿入) — ホストの FORWARD に既存 DROP (Docker/firewalld 等) が
-  # あっても前に挿入されるため片方向だけ通る事態を防ぐ。-A は後続 DROP の後になり
-  # 戻りが落ちうる。許可は 192.168.50.2 (サーバー) 限定 — クライアント (192.168.50.3)
-  # やルーター (192.168.50.1) が万一 mgmt 経由で送信しても実ネットワークへ出られない。
-  echo "$(cat /proc/sys/net/ipv4/ip_forward)" > /tmp/mqvpn-ipforward 2>/dev/null || true
+  # サーバー(.2)のみ上流へ: -I必須 (-Aだと既存DROPの後になり戻りが落ちる)。
+  echo "$(cat /proc/sys/net/ipv4/ip_forward)" >/tmp/mqvpn-ipforward 2>/dev/null || true
   sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null
   realif=$(ip route get 8.8.8.8 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i=="dev") { print $(i+1); exit } }')
   if [ -n "$realif" ]; then
@@ -93,14 +94,8 @@ setup_network() {
   done
 }
 
-# ISP シム DHCP (dnsmasq) を専用 netns で立てる。MAC ピン留めで
-# 10.200.i.2 + router 10.200.i.1 を配布し、現行の静的マッピングを再現する。
-# MAC は test/mogami-vm.nix の allNics と対応 (trw0→eth1→10.200.0.2、
-# trw1→eth3→10.200.1.2、…、trw11→eth13→10.200.11.2)。
-# netns に閉じ込める理由: ホストの FW・ネットワーク設定に一切触れないため
-# (netns は独自の FW テーブル = 既定 ACCEPT を持つ)。veth 片端をブリッジに
-# 差すだけで L2 到達し、後片付けは `ip netns delete` 一発で残骸なし。
-# 対象ブリッジ以外には一切触れない (dnsmasq 側は --bind-interfaces)。
+# ISPシムDHCPを専用netnsで立てる (ホストFW無干渉・後片付けはnetns delete一発)。
+# MACピン留めで10.200.i.2+GW配布。MAC対応はtest/mogami-vm.nixのallNics参照。
 start_lab_dhcp() {
   echo "=== starting lab DHCP (dnsmasq in netns mqvpn-isp) ==="
   local bin
@@ -110,10 +105,11 @@ start_lab_dhcp() {
     echo "  dnsmasq not found, provisioning via nix (one-time download)"
     bin="$(nix build --no-link --print-out-paths 'nixpkgs#dnsmasq')/bin/dnsmasq"
   fi
-  [ -x "$bin" ] || { echo "ERROR: dnsmasq provisioning failed"; exit 1; }
-  # 再実行時に前回残があっても壊れないよう stop と同じ順で掃除する
-  # (kill せず netns だけ消すと旧 dnsmasq が netns を掴んだまま残り、
-  # pidfile 上書きで orphan 化 + 残存 isp-br で `ip link add` が File exists になる)。
+  [ -x "$bin" ] || {
+    echo "ERROR: dnsmasq provisioning failed"
+    exit 1
+  }
+  # 前回残があっても壊れないようstopと同じ順で掃除 (orphan化防止)。
   if [ -f /tmp/mqvpn-dnsmasq.pid ]; then
     sudo kill "$(cat /tmp/mqvpn-dnsmasq.pid)" 2>/dev/null || true
   fi
@@ -126,9 +122,7 @@ start_lab_dhcp() {
   sudo ip link set isp-dhcp netns mqvpn-isp
   sudo ip netns exec mqvpn-isp ip link set lo up
   sudo ip netns exec mqvpn-isp ip link set isp-dhcp up
-  # dnsmasq は到着 IF 直下以外の subnet を配らないため、12 subnet 分を
-  # veth に載せる (.254 は未使用。netns 内のみ有効)。
-  # dnsmasq はアドレスの無い IF のパケットを捨てるため、この付与が必須。
+  # dnsmasqは到着IF直下以外のsubnetを配らないため12subnet分をvethに載せる (必須)。
   for i in {0..11}; do
     sudo ip netns exec mqvpn-isp ip addr add "10.200.$i.254/24" dev isp-dhcp
   done
@@ -163,8 +157,8 @@ build_and_start() {
     --out-link /tmp/result-$link --print-build-logs
   ln -sf /tmp/result-$link "$SCRIPT_DIR/result-$link" 2>/dev/null || true
   echo "=== $attr build done; starting $suffix VM ==="
-  setsid "$SCRIPT_DIR/start-vm.sh" "$suffix" </dev/null > "/tmp/mqvpn-$link.log" 2>&1 &
-  echo $! > "/tmp/mqvpn-$link.pid"
+  setsid "$SCRIPT_DIR/start-vm.sh" "$suffix" </dev/null >"/tmp/mqvpn-$link.log" 2>&1 &
+  echo $! >"/tmp/mqvpn-$link.pid"
 }
 
 # ネットワークは VM 起動前に必要なので先に構築
@@ -177,12 +171,16 @@ echo "=== building + launching VMs in parallel ==="
 pids=()
 for spec in "server:mogami-server:server" "mogami:mogami-vm:router" "client:mogami-client:client" "mnet:mogami-mnet:mnet"; do
   IFS=: read -r link attr suffix <<<"$spec"
-  build_and_start "$link" "$attr" "$suffix" & pids+=($!)
+  build_and_start "$link" "$attr" "$suffix" &
+  pids+=($!)
 done
 
 fail=0
 for p in "${pids[@]}"; do
-  if ! wait "$p"; then echo "ERROR: a build job failed (pid $p)"; fail=1; fi
+  if ! wait "$p"; then
+    echo "ERROR: a build job failed (pid $p)"
+    fail=1
+  fi
 done
 [ "$fail" -eq 0 ] || exit 1
 

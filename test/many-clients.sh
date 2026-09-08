@@ -1,27 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# =============================================================================
-# many-clients.sh: 下流の多クライアント環境を模した実環境寄りテスト
+# many-clients.sh: 下流の多クライアント環境を模した実環境寄りテスト。
+# bench.shは単一VM・単一IP/MAC発射のため実環境 (70人規模) と乖離する:
+#   1. ECMPエントロピー不足 (単一srcIPではportのみ分散) 2. conntrack/NAT未検証
+#   3. DHCP/ARP/DNSの多端末負荷未測定 (140並列DNSで34%欠損の事例あり)
+#   4. bulkのみで小フローmix無し。
 #
-# 背景 (bench.sh との違い):
-#   bench.sh の measure / multistream / stagger は全て mogami-client 単一 VM の
-#   単一 IP (DHCP の 172.16.0.x 1 個)・単一 MAC から発射される。実環境 (70 人規模,
-#   chiken/mqvpn-real-env.md) との乖離:
-#     1. ECMP ハッシュのエントロピー不足: 単一 srcIP では port のみが分散要素。
-#        実環境は srcIP が 70〜140 種類あり、トンネル間の振り分けが変わる。
-#     2. conntrack / NAT テーブルのスケール未検証: 単一 IP の P=20 と 70IP×1 は
-#        エントリ数が違い、GC・衝突・上限の出方が違う。
-#     3. DHCP (Kea) / ARP / DNS (unbound) の多端末負荷が未測定:
-#        140 並列 DNS で 34% 欠損した事例あり (router/network.nix の unbound 設定)。
-#     4. トラフィック mix が bulk のみ: 実態は多数の小フロー + たまの speedtest。
-#
-# 方式: client VM 内に N 個の仮想クライアントを生やす。2 モード:
-#   - alias (既定, 軽量): eth0 に secondary IP (172.31.250.1〜, pool 末尾側) を付与。
-#     ECMP / conntrack / mix 試験用。DHCP・L2 は試験しない。
-#   - l2: eth0 上に macvlan (mc0...) を N 個作り、各々 DHCP で Kea から実リース取得。
-#     DHCP ストーム / ARP / MAC 多様性まで試験。from-rule + table で復路を macvlan
-#     に戻す (policy routing)。
+# 方式: client VM内にN個の仮想クライアントを生やす。2モード:
+#   - alias (既定): eth0にsecondary IP付与。ECMP/conntrack/mix用。
+#   - l2: macvlan+N個DHCPで実リース取得。DHCPストーム/ARPまで試験
+#     (復路はfrom-rule+tableのpolicy routing)。
 #
 # Usage:
 #   ./test/many-clients.sh up [N] [--l2]       # 仮想クライアント作成 (既定 N=70)
@@ -33,22 +22,21 @@ set -euo pipefail
 #     diverse: クエリ毎に別 QNAME (RANDOM 付きで negative cache も効かないフル再帰)。
 #     spread_ms>0 で各台の開始を分散し一斉性の影響を分離。per-query 遅延分布＋unbound CPU 付き
 #   ./test/many-clients.sh dhcp-storm [N]      # l2 全台の同時 release/renew
-#   ./test/many-clients.sh netem <ms|hetero|asym|clear>  # WAN netem (bench.sh と同型)
-#     ms: 上下均一遅延。up はルーター WAN egress、下りはホスト tap egress に
-#         付与するため RTT には往復分 (約 2x ms) が載る。例: netem 10 ≒ RTT+20ms
-#         (実回線 23ms の再現は base 2.5ms + netem 10)。hetero: 不均質
-#         (45ms/12ms/loss1% 系×3)。asym: 非対称容量 (up 35M / down 150M,
-#         delay 12ms) で bufferbloat 気味の実回線再現。bulk/mix/dns の前に掛けて使う
+#   ./test/many-clients.sh netem <ms|hetero|asym|clear>  # WAN netem (bench.shと同型)
+#     upはルーターWAN egress・下りはホストtap egressに付与 (RTTは往復分≒2x。
+#     実回線23ms再現はbase 2.5ms+netem 10)。hetero=不均質 / asym=非対称容量。
 #
-# 前提: lab 起動済み (test/up.sh)。mnet の iperf ポートは必要分だけ自動で足す
-#   (5301 以降は実行時に iptables で一時開放。down では閉じないが lab 破棄で消える)。
-# 注意: client VM (2vCPU) 自体が 140 並列 iperf の CPU 天井になる場合あり。
-#   bulk の client 側合計が頭打ちで per-WAN に余裕があれば client 律速を疑うこと。
-# =============================================================================
+# 前提: lab起動済み (test/up.sh)。mnetのiperfポートは必要分だけ自動追加。
+# 注意: client VM (2vCPU) 自体が並列iperfの天井になる場合あり (per-WANに余裕が
+#   あるのに頭打ちならclient律速を疑うこと)。
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-[ $# -ge 1 ] || { echo "usage: $0 <up|down|status|bulk|mix|dns|dhcp-storm|netem> [...]"; exit 1; }
-CMD="$1"; shift || true
+[ $# -ge 1 ] || {
+  echo "usage: $0 <up|down|status|bulk|mix|dns|dhcp-storm|netem> [...]"
+  exit 1
+}
+CMD="$1"
+shift || true
 
 ssh_rtr() { timeout 90 "$SCRIPT_DIR/ssh-router.sh" "$@"; }
 ssh_cli() { timeout 120 "$SCRIPT_DIR/ssh-client.sh" "$@"; }
@@ -57,12 +45,15 @@ ssh_srv() { timeout 90 "$SCRIPT_DIR/ssh-server.sh" "$@"; }
 
 TARGET="${BENCH_TARGET:-192.168.100.1}"
 PORT_BASE=5201
-ALIAS_BASE="172.31.250"   # Kea pool 末尾側。逐次割当では到達しない領域
+ALIAS_BASE="172.31.250" # Kea pool 末尾側。逐次割当では到達しない領域
 MC_MAX=250
 
 # WAN NIC 一覧は flake が唯一の情報源 (bench.sh と同じ)
 rtr_wan=($(nix eval --json "path:$(cd "$SCRIPT_DIR/.." && pwd)#nixosConfigurations.mogami-vm.config.services.mqvpn.interfaces" 2>/dev/null | nix shell nixpkgs#jq --command jq -r '.[]' 2>/dev/null || true))
-[ "${#rtr_wan[@]}" -gt 0 ] || { echo "ERROR: WAN NIC 一覧を flake から取得できない" >&2; exit 1; }
+[ "${#rtr_wan[@]}" -gt 0 ] || {
+  echo "ERROR: WAN NIC 一覧を flake から取得できない" >&2
+  exit 1
+}
 
 iface_counter() { # $1=iface $2=RX|TX (数値のみ返す)
   ssh_rtr "ip -s link show $1 2>/dev/null | awk '/$2:/{getline;print \$1}'" 2>/dev/null | grep -E '^[0-9]+$' | tail -1
@@ -75,7 +66,10 @@ wait_tunnels() {
   local i n
   for i in $(seq 1 24); do
     n=$(ssh_rtr 'm=$(ip route show default 2>/dev/null | grep -c "nexthop dev mqvpn"); p=$(for d in mqvpn0 mqvpn1 mqvpn2; do ip -o addr show $d 2>/dev/null | grep -o "peer [0-9.]*"; done | wc -l); echo "$m/$p"' 2>/dev/null | grep -oE '[0-9]+/[0-9]+' | tail -1)
-    [ "$n" = "3/3" ] && { echo "tunnels ready (ECMP 3 + peers 3)"; return 0; }
+    [ "$n" = "3/3" ] && {
+      echo "tunnels ready (ECMP 3 + peers 3)"
+      return 0
+    }
     sleep 5
   done
   echo "WARN: tunnels not fully ready ($n). continue anyway" >&2
@@ -90,11 +84,24 @@ host_wan=(trw0 trw1 trw2)
 mc_netem() { # $1=clear|hetero|asym|$ms
   local spec="$1" rcmd hcmd
   case "$spec" in
-    clear) ssh_rtr "for i in ${rtr_wan[*]}; do sudo -n tc qdisc del dev \$i root 2>/dev/null || true; done; echo netem-cleared" 2>/dev/null | tail -1
-      for t in "${host_wan[@]}"; do sudo -n tc qdisc del dev "$t" root 2>/dev/null || true; done; echo "netem-cleared-host"; return ;;
-    hetero) rcmd="delay 45ms 12ms loss 1% limit 100000"; hcmd="$rcmd" ;;
-    asym) rcmd="delay 12ms rate 35mbit limit 100000"; hcmd="delay 12ms rate 150mbit limit 100000" ;;
-    *) rcmd="delay ${spec}ms limit 100000"; hcmd="$rcmd" ;;
+    clear)
+      ssh_rtr "for i in ${rtr_wan[*]}; do sudo -n tc qdisc del dev \$i root 2>/dev/null || true; done; echo netem-cleared" 2>/dev/null | tail -1
+      for t in "${host_wan[@]}"; do sudo -n tc qdisc del dev "$t" root 2>/dev/null || true; done
+      echo "netem-cleared-host"
+      return
+      ;;
+    hetero)
+      rcmd="delay 45ms 12ms loss 1% limit 100000"
+      hcmd="$rcmd"
+      ;;
+    asym)
+      rcmd="delay 12ms rate 35mbit limit 100000"
+      hcmd="delay 12ms rate 150mbit limit 100000"
+      ;;
+    *)
+      rcmd="delay ${spec}ms limit 100000"
+      hcmd="$rcmd"
+      ;;
   esac
   ssh_rtr "for i in ${rtr_wan[*]}; do sudo -n tc qdisc replace dev \$i root netem $rcmd; done; echo applied" 2>/dev/null | tail -1
   for t in "${host_wan[@]}"; do sudo -n tc qdisc replace dev "$t" root netem $hcmd; done
@@ -102,8 +109,11 @@ mc_netem() { # $1=clear|hetero|asym|$ms
 }
 do_netem() { # $1=ms|hetero|asym|clear
   case "${1:-}" in
-    clear|hetero|asym) mc_netem "$1" ;;
-    ''|*[!0-9]*) echo "usage: $0 netem <delay_ms|hetero|asym|clear>"; exit 1 ;;
+    clear | hetero | asym) mc_netem "$1" ;;
+    '' | *[!0-9]*)
+      echo "usage: $0 netem <delay_ms|hetero|asym|clear>"
+      exit 1
+      ;;
     *) mc_netem "$1" ;;
   esac
   sleep 3 # WLB/TCP の過渡が落ち着くまで少し待つ (厳密な収束待ちは bench.sh wlbstate)
@@ -124,12 +134,15 @@ ensure_iperfd_mnet() { # $1=N
 # 複雑な client 側処理はスクリプト配送→実行 (bench.sh の ship_common と同型)。
 # 配送先は毎回一意化する (mix のように BG/FG 並走すると同名だと踏み合うため)。
 run_on_cli() { # $1=script $2...=args
-  local script="$1"; shift
-  local f; f=$(mktemp /tmp/mc-run-XXXXXX.sh)
+  local script="$1"
+  shift
+  local f
+  f=$(mktemp /tmp/mc-run-XXXXXX.sh)
   printf '%s\n' "$script" | ssh_cli "cat > $f && chmod +x $f && $f $*; rm -f $f" 2>&1 | grep -vE 'fetching|Warning:' || true
 }
 
-MC_UP_ALIAS=$(cat <<'EOF'
+MC_UP_ALIAS=$(
+  cat <<'EOF'
 #!/usr/bin/env bash
 # $1=N: eth0 に secondary IP を付与し /tmp/mc-ips.txt (1行1IP) に記録
 set -euo pipefail
@@ -148,7 +161,8 @@ echo "alias-up N=$N ($BASE.1-$BASE.$N on eth0)"
 EOF
 )
 
-MC_UP_L2=$(cat <<'EOF'
+MC_UP_L2=$(
+  cat <<'EOF'
 #!/usr/bin/env bash
 # $1=N: macvlan + DHCP で実リース取得。from-rule で復路を macvlan に戻す。
 # 注意: client の system dhcpcd が mc* を自動管理するため直接 dhcpcd を叩かない。
@@ -185,7 +199,8 @@ echo "l2-up done: $(wc -l < /tmp/mc-ips.txt)/$N addrs"
 EOF
 )
 
-MC_DOWN=$(cat <<'EOF'
+MC_DOWN=$(
+  cat <<'EOF'
 #!/usr/bin/env bash
 # 仮想クライアント全掃除 (alias + l2 両対応)
 set -euo pipefail
@@ -225,15 +240,20 @@ do_status() {
 need_ips() { # $1=N: /tmp/mc-ips.txt の行数確認
   local n="$1" have
   have=$(ssh_cli 'wc -l < /tmp/mc-ips.txt 2>/dev/null || echo 0' 2>/dev/null | grep -oE '[0-9]+' | tail -1)
-  [ "${have:-0}" -ge "$n" ] || { echo "仮想クライアント不足 (have=${have:-0} need=$n)。先に '$0 up $n' を実行"; exit 1; }
+  [ "${have:-0}" -ge "$n" ] || {
+    echo "仮想クライアント不足 (have=${have:-0} need=$n)。先に '$0 up $n' を実行"
+    exit 1
+  }
 }
 
 snap_cpu() { # $1=rtr|srv $2=tag: /proc/stat の cpu 行を保存 (前後差で % 算出用)
-  local ssh="ssh_rtr"; [ "$1" = "srv" ] && ssh="ssh_srv"
+  local ssh="ssh_rtr"
+  [ "$1" = "srv" ] && ssh="ssh_srv"
   $ssh "grep '^cpu ' /proc/stat | awk '{print \$2+\$3+\$4, \$2+\$3+\$4+\$5+\$6+\$7+\$8+\$9}' > /tmp/mc-cpu-$2" >/dev/null 2>&1 || true
 }
 cpu_pct() { # $1=rtr|srv $2=before $3=after
-  local ssh="ssh_rtr"; [ "$1" = "srv" ] && ssh="ssh_srv"
+  local ssh="ssh_rtr"
+  [ "$1" = "srv" ] && ssh="ssh_srv"
   local b0=0 b1=0 t0=0 t1=1
   read -r b0 t0 < <($ssh "cat /tmp/mc-cpu-$2" 2>/dev/null | grep -oE '[0-9]+ [0-9]+' | tail -1) || true
   read -r b1 t1 < <($ssh "cat /tmp/mc-cpu-$3" 2>/dev/null | grep -oE '[0-9]+ [0-9]+' | tail -1) || true
@@ -241,7 +261,8 @@ cpu_pct() { # $1=rtr|srv $2=before $3=after
   awk -v b0="$b0" -v b1="$b1" -v t0="$t0" -v t1="$t1" 'BEGIN{d=t1-t0; if(d<=0){print "?"} else {printf "%.0f%%", (b1-b0)*100/d}}' 2>/dev/null || echo "?"
 }
 
-MC_BULK=$(cat <<'EOF'
+MC_BULK=$(
+  cat <<'EOF'
 #!/usr/bin/env bash
 # $1=TARGET $2=sec [$3=ipfile] [$4=down|up]: 各 IP から別ポートで 1フローずつ bulk
 set -euo pipefail
@@ -267,8 +288,13 @@ EOF
 
 do_bulk() {
   local n="${1:-70}" sec="${2:-20}" dir="${3:-down}"
-  [ "$dir" = down ] || [ "$dir" = up ] || { echo "dir must be down|up"; exit 1; }
-  need_ips "$n"; ensure_iperfd_mnet "$n"; wait_tunnels
+  [ "$dir" = down ] || [ "$dir" = up ] || {
+    echo "dir must be down|up"
+    exit 1
+  }
+  need_ips "$n"
+  ensure_iperfd_mnet "$n"
+  wait_tunnels
   echo "== bulk: $n clients x 1flow $dir (${sec}s, srcIP 別) =="
   local i w snap
   snap() { if [ "$dir" = up ]; then tx_bytes "$1"; else rx_bytes "$1"; fi; }
@@ -277,13 +303,15 @@ do_bulk() {
   local ct0 sct0
   ct0=$(ssh_rtr 'cat /proc/sys/net/netfilter/nf_conntrack_count' 2>/dev/null | grep -E '^[0-9]+$' | tail -1)
   sct0=$(ssh_srv 'cat /proc/sys/net/netfilter/nf_conntrack_count' 2>/dev/null | grep -E '^[0-9]+$' | tail -1)
-  snap_cpu rtr pre; snap_cpu srv pre
+  snap_cpu rtr pre
+  snap_cpu srv pre
   run_on_cli "$MC_BULK" "$TARGET" "$sec" /tmp/mc-ips.txt "$dir"
-  snap_cpu rtr post; snap_cpu srv post
+  snap_cpu rtr post
+  snap_cpu srv post
   local tot=0 mbps B1
   for w in "${rtr_wan[@]}"; do
     B1=$(snap "$w")
-    mbps=$(( (${B1:-0} - ${B0[$w]:-0}) * 8 / (sec * 1000000) ))
+    mbps=$(((${B1:-0} - ${B0[$w]:-0}) * 8 / (sec * 1000000)))
     printf "  %-6s %8d Mbps\n" "$w" "$mbps"
     tot=$((tot + mbps))
   done
@@ -292,7 +320,8 @@ do_bulk() {
   echo "  CPU rtr: $(cpu_pct rtr pre post)  srv: $(cpu_pct srv pre post)"
 }
 
-MC_TRICKLE=$(cat <<'EOF'
+MC_TRICKLE=$(
+  cat <<'EOF'
 #!/usr/bin/env bash
 # $1=TARGET $2=sec: 各仮想 IP から ping + DNS を細く長く (background 負荷)
 set -euo pipefail
@@ -315,9 +344,13 @@ EOF
 
 do_mix() {
   local n="${1:-70}" k="${2:-5}" sec="${3:-30}" dir="${4:-down}"
-  [ "$dir" = down ] || [ "$dir" = up ] || { echo "dir must be down|up"; exit 1; }
+  [ "$dir" = down ] || [ "$dir" = up ] || {
+    echo "dir must be down|up"
+    exit 1
+  }
   [ "$k" -le "$n" ] || k="$n"
-  need_ips "$n"; ensure_iperfd_mnet "$k"
+  need_ips "$n"
+  ensure_iperfd_mnet "$k"
   echo "== mix: trickle $n + burst $k x bulk $dir (${sec}s) =="
   # burst 用に先頭 K 行を切出し (trickle は全 N、bulk は K の別ファイルで競合なし)
   ssh_cli "head -$k /tmp/mc-ips.txt > /tmp/mc-burst.txt" >/dev/null 2>&1 || true
@@ -330,7 +363,8 @@ do_mix() {
   echo "(trickle の loss/dns は burst 干渉下の値。単独時との差が体感劣化の目安)"
 }
 
-MC_DNS=$(cat <<'EOF'
+MC_DNS=$(
+  cat <<'EOF'
 #!/usr/bin/env bash
 # $1=Q $2=mode(fixed|diverse) $3=N [$4=spread_ms]: N 台が各 Q 発を dig @172.16.0.1。
 # spread>0 で各台の開始を 0〜spread ms に分散 (一斉性の影響分離用)。
@@ -362,19 +396,28 @@ EOF
 
 do_dns() {
   local n="${1:-70}" q="${2:-5}" mode="${3:-fixed}" spread="${4:-0}" round
-  [ "$mode" = fixed ] || [ "$mode" = diverse ] || { echo "mode must be fixed|diverse"; exit 1; }
+  [ "$mode" = fixed ] || [ "$mode" = diverse ] || {
+    echo "mode must be fixed|diverse"
+    exit 1
+  }
   need_ips "$n"
   echo "== dns burst ($mode, spread=${spread}ms): $n clients x $q queries @172.16.0.1 (round1/round2) =="
-  local hztick; hztick=$(ssh_rtr 'getconf CLK_TCK 2>/dev/null || echo 100' 2>/dev/null | grep -oE '[0-9]+' | tail -1)
+  local hztick
+  hztick=$(ssh_rtr 'getconf CLK_TCK 2>/dev/null || echo 100' 2>/dev/null | grep -oE '[0-9]+' | tail -1)
   hztick="${hztick:-100}"
   snap_cpu rtr pre
-  local ub_pre t_pre; ub_pre=$(unbound_jiffies); t_pre=$(date +%s)
+  local ub_pre t_pre
+  ub_pre=$(unbound_jiffies)
+  t_pre=$(date +%s)
   for round in 1 2; do
     run_on_cli "$MC_DNS" "$q" "$mode" "$n" "$spread" | sed "s/^/round$round: /"
   done
-  local ub_post t_post; ub_post=$(unbound_jiffies); t_post=$(date +%s)
+  local ub_post t_post
+  ub_post=$(unbound_jiffies)
+  t_post=$(date +%s)
   snap_cpu rtr post
-  local wall=$((t_post - t_pre)); [ "$wall" -gt 0 ] || wall=1
+  local wall=$((t_post - t_pre))
+  [ "$wall" -gt 0 ] || wall=1
   echo "unbound CPU: $(awk -v a="$ub_pre" -v b="$ub_post" -v w="$wall" -v h="$hztick" 'BEGIN{printf "%.0f%%core", (b-a)/w/h*100}')"
   echo "router CPU: $(cpu_pct rtr pre post)"
   echo "-- unbound (best-effort) --"
@@ -389,8 +432,10 @@ do_dhcp_storm() {
   local n="${1:-70}"
   echo "== dhcp-storm: $n 台同時 release/renew (l2) =="
   run_on_cli "$MC_UP_L2" "$n" | tail -2
-  local since; since=$(ssh_rtr 'date "+%Y-%m-%d %H:%M:%S"' 2>/dev/null | grep -vE 'fetching|Warning:' | tail -1)
-  time run_on_cli "$(cat <<'EOF'
+  local since
+  since=$(ssh_rtr 'date "+%Y-%m-%d %H:%M:%S"' 2>/dev/null | grep -vE 'fetching|Warning:' | tail -1)
+  time run_on_cli "$(
+    cat <<'EOF'
 #!/usr/bin/env bash
 # system dhcpcd 経由で全台 release → renew (daemon は1つ。-k/-n で操作)
 set -euo pipefail
@@ -418,14 +463,15 @@ for s in $(seq 1 25); do
 done
 echo "renewed(dynamic addr back): $ok/$total"
 EOF
-)"
+  )"
   echo "-- kea errors since $since --"
   ssh_rtr "sudo journalctl --since '$since' --no-pager -u kea-dhcp4-server.service 2>/dev/null | grep -ciE 'error|fail|drop|exhaust' | xargs echo 'kea err lines:'" 2>/dev/null | grep -vE 'fetching|Warning:' | tail -1
 }
 
 case "$CMD" in
   up)
-    N="${1:-70}"; MODE="${2:-alias}"
+    N="${1:-70}"
+    MODE="${2:-alias}"
     if [ "$MODE" = "--l2" ] || [ "$MODE" = "l2" ]; then
       run_on_cli "$MC_UP_L2" "$N"
     else
@@ -440,5 +486,8 @@ case "$CMD" in
   dns) do_dns "${1:-70}" "${2:-5}" "${3:-fixed}" "${4:-0}" ;;
   dhcp-storm) do_dhcp_storm "${1:-70}" ;;
   netem) do_netem "${1:-}" ;;
-  *) echo "unknown: $CMD (use: up|down|status|bulk|mix|dns|dhcp-storm|netem)"; exit 1 ;;
+  *)
+    echo "unknown: $CMD (use: up|down|status|bulk|mix|dns|dhcp-storm|netem)"
+    exit 1
+    ;;
 esac

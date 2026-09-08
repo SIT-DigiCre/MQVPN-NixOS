@@ -1,8 +1,14 @@
-{ pkgs, stdenv, fetchFromGitHub, ... }:
+{
+  pkgs,
+  stdenv,
+  fetchFromGitHub,
+  ...
+}:
 
 let
   version = "0.16.1";
-in stdenv.mkDerivation {
+in
+stdenv.mkDerivation {
   pname = "mqvpn";
   inherit version;
 
@@ -17,28 +23,26 @@ in stdenv.mkDerivation {
   patches = [
     ../patches/mqvpn-max-paths.patch
     ../patches/xquic-wlb-capacity-pinning.patch
-    # ① ピン選択への軽い低RTT優遇 (容量比例ベースライン上)。P1 の regression 教訓から独立 revert 可能に。
-    # 検証ゲート: latab (目的B 回復) + 等帯域 collapse ベンチ (目的A 悪化なし)。
+    # 低RTT優遇 (容量比例ベースライン上。独立revert可能に分離)。
     ../patches/xquic-wlb-rtt-favor.patch
     ../patches/xquic-reinjection-scan.patch
-    # トレードオフ: 再注入スキャンをモード毎に2msに間引き(要CPU削減)。
-    # 対価は (1) 再注入の遅延上界 +≤2ms — deadline(実質20ms下限) や
-    #    PTO 再送(~RTT=100ms) と比べ無視できる。危険局面(2ms窓内ロス)は
-    #    PTO が救済するため実効損失回復特性は不変。
-    # (2) 複製送信が~2ms刻みのバーストに固まる — レート換算は元送信と同程度。
-    # 計測: 飽和下 800M 要求で 795Mbps/0.65%ロス(パッチ前 710-734/8-11%)、
-    #   上限 ~600M→~1.06Gbps。間隔は XQC_REINJ_SCAN_INTERVAL_US で調整可。
-    # メンテ: vendored xquic の fork 差分が増える(アップグレード追従コスト)。
+    # xquic-reinjection-rate-limit: 再注入スキャンを2ms間引き (CPU削減)。
+    # 遅延上界+≤2msはdeadline/PTO比で無視でき、PTOが救済するため回復特性は不変。
+    # 飽和下800M要求で795Mbps/0.65%ロス (前710-734/8-11%)、上限~600M→~1.06Gbps。
+    # 間隔はXQC_REINJ_SCAN_INTERVAL_USで調整。
     ../patches/xquic-reinjection-rate-limit.patch
   ];
 
   dontUseCmakeConfigure = true;
-  nativeBuildInputs = with pkgs; [ cmake autoPatchelfHook git ];
+  nativeBuildInputs = with pkgs; [
+    cmake
+    autoPatchelfHook
+    git
+  ];
   buildInputs = with pkgs; [ libevent ];
 
   buildPhase = ''
-    # 上流のビルドスクリプトを流用(boringssl → xquic → mqvpn)。
-    # Nix 環境では libevent ヘッダの場所チェック(/usr/include)が無意味なため除去
+    # Nixでは/usr/include検査が無意味なため除去し上流build.shを流用。
     sed -i '/if ! find -L \/usr\/include/,/^fi$/d' build.sh
     patchShebangs build.sh
     ./build.sh
@@ -51,9 +55,7 @@ in stdenv.mkDerivation {
     ln -sf libmqvpn.so.3 $out/lib/libmqvpn.so
   '';
 
-  # 上流 build.sh の産物は /build/ への RPATH を残すため、autoPatchelfHook
-  # だけでは forbidden reference が消えない。$out/lib へ明示付け替えが必須
-  # (削除するとビルドが RPATH エラーで落ちることを lab 再構築で確認)。
+  # 上流産物は/build/へのRPATHを残すため$out/libへ付け替え必須 (削除でRPATHエラー)。
   preFixup = ''
     patchelf --set-rpath "$out/lib" $out/bin/mqvpn
     patchelf --set-rpath "$out/lib" $out/lib/libmqvpn.so.3

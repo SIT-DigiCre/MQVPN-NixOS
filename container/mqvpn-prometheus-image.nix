@@ -2,18 +2,10 @@
   pkgs,
 }:
 let
-  # 公式 prometheus イメージをピン (digest + sha256) してベースにし、
-  # prometheus.yml (scrape targets は compose の mqvpn-server-* から自動生成) を
-  # 1 レイヤ焼き込む。
-  #
-  # ネットワークモデル: prometheus は network_mode: host (compose 側) で動かし、
-  # サーバー同様にホスト netns を共有する。exporter はホストの
-  # 127.0.0.1:9091+idx*2 で待つため、スクレイプは常に loopback で完結する
-  # (ブリッジを経由しない → UFW 等の INPUT 制限・サブネット変動の影響を受けない)。
-  #
-  # NOTE: この nixpkgs の buildLayeredImage + fromImage は base config のうち
-  # Env しか継承しない (Entrypoint/Cmd/User/Volumes 等は落ちる) ため、
-  # 必要フィールドは明示する。値はピンした v3.14.0 の Dockerfile/config 由来。
+  # 公式prometheusをピン留めしprometheus.ymlを1レイヤ焼き込む。
+  # host共有+loopback完結のためブリッジを経由しない
+  # (UFW等のINPUT制限・サブネット変動の影響を受けない。compose側も参照)。
+  # fromImage継承の注意はdocker-base.nix参照。
   prometheusBase = pkgs.callPackage ./docker-base.nix {
     imageName = "prom/prometheus";
     imageDigest = "sha256:5ce7540c3c00ef4ab0c9d2c995c6a5b9c421f44b4a115d97a2c7af3b1c21cbb0";
@@ -22,19 +14,17 @@ let
     outputHash = "sha256-8LJjocjSt/HMsXcSwbrLw8f6wH5yOqDzZ7SvVOkKqaw=";
   };
 
-  # prometheus.yml を生成して /etc/prometheus/ に配置するレイヤ。
-  # targets はサーバー集合の SSOT (./mqvpn-servers.nix) から作る。
-  # instance ラベルはサービス名に固定する (Grafana の Server 変数 =
-  # label_values(mqvpn_build_info, instance) と焼き込み済み初期選択が一致する)。
+  # prometheus.ymlを/etc/prometheus/に配置するレイヤ (targetsはSSOTから生成)。
+  # instance=サービス名に固定 (GrafanaのServer変数の初期選択と一致させる)。
   prometheusConf =
     let
       servers = import ./mqvpn-servers.nix;
-      # "name port" 行 (exporter 待受 = 9091+idx*2 は entrypoint 側の導出と同一)。
+      # exporter待受 (9091+idx*2) の導出はSSOT (mqvpn-servers.nix) と同一。
       serverTargets = builtins.concatStringsSep "\n" (
         map (i: "mqvpn-server-${toString i} ${toString (9091 + i * 2)}") servers.serverIdxs
       );
     in
-    assert servers.serverIdxs != [];
+    assert servers.serverIdxs != [ ];
     pkgs.runCommand "mqvpn-prometheus-etc" { } ''
         mkdir -p $out/etc/prometheus
         {
@@ -45,7 +35,7 @@ let
       ${serverTargets}
       EOF
         } > $out/etc/prometheus/prometheus.yml
-      '';
+    '';
 
   image = pkgs.dockerTools.buildLayeredImage {
     name = "mqvpn-prometheus";
@@ -57,9 +47,7 @@ let
       Entrypoint = [ "/bin/prometheus" ];
       Cmd = [
         "--config.file=/etc/prometheus/prometheus.yml"
-        # loopback 限定で公開しない。ポートは control API (9090+idx*2) /
-        # exporter (9091+idx*2) の家族 (9090..9217) と重ならない 9000 を固定
-        # (9100 だと idx=5 の control API と衝突する)
+        # loopback限定・9000固定 (9100はidx=5のcontrol APIと衝突するため)。
         "--web.listen-address=127.0.0.1:9000"
         "--storage.tsdb.path=/prometheus"
       ];

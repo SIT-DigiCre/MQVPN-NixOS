@@ -1,4 +1,9 @@
-{ stdenv, fetchurl, autoPatchelfHook, zlib }:
+{
+  stdenv,
+  fetchurl,
+  autoPatchelfHook,
+  zlib,
+}:
 
 stdenv.mkDerivation rec {
   pname = "live-chart";

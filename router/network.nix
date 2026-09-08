@@ -18,9 +18,8 @@ in
   networking.enableIPv6 = false;
   networking.firewall.checkReversePath = false;
 
-  # 全 IF を systemd-networkd で管理し、dhcpcd は使わない (単一スタック化)。
-  # WAN は DHCP (本番 ISP / lab の ISP シム) で GW を取得し、per-WAN metric で
-  # 共存させる (fail-open 時のフォールバック順序。lab 12 本・本番 7 本とも同式)。
+  # 全IFをsystemd-networkdに一本化 (dhcpcd不使用)。
+  # WANはDHCP+per-WAN metricで共存 (fail-open時はmetricフォールバックに委ねる)。
   networking.useNetworkd = true;
   networking.dhcpcd.enable = false;
 
@@ -30,30 +29,27 @@ in
       allow 172.16.0.0/12
     '';
   };
-  # systemd-resolved は無効化: 127.0.0.53 の stub が :53 を掴むと unbound
-  # (0.0.0.0:53) が bind 競合で起動失敗する。起動順のレースで勝敗が変わるため
-  # 確定的に無効化する (lab で LAN DNS 全滅を確認)。ルーター自身の名前解決は
-  # unbound (127.0.0.1) が担う。
+  # resolved無効化: stub :53 が unbound (0.0.0.0:53) と競合するため
+  # (labでLAN DNS全滅を確認)。自身の解決はunbound (127.0.0.1) が担う。
   services.resolved.enable = false;
-  # resolved 無効化に伴い、ルーター自身の参照先を unbound (127.0.0.1) に固定する
-  # (既定の stub-resolv.conf は 127.0.0.53 を指すため)。
   networking.nameservers = [ "127.0.0.1" ];
 
-  # LAN は静的。WAN は services.mqvpn.interfaces の順に DHCP + metric 付与。
-  systemd.network.networks =
-    {
-      "10-lan" = {
-        matchConfig.Name = lanInterface;
-        address = [ "${localIp}/12" ];
-      };
-    }
-    // lib.listToAttrs (lib.imap0
-      (i: name: lib.nameValuePair "10-wan${toString i}" {
+  systemd.network.networks = {
+    "10-lan" = {
+      matchConfig.Name = lanInterface;
+      address = [ "${localIp}/12" ];
+    };
+  }
+  // lib.listToAttrs (
+    lib.imap0 (
+      i: name:
+      lib.nameValuePair "10-wan${toString i}" {
         matchConfig.Name = name;
         networkConfig.DHCP = "ipv4";
         dhcpV4Config.RouteMetric = i + 1;
-      })
-      config.services.mqvpn.interfaces);
+      }
+    ) config.services.mqvpn.interfaces
+  );
 
   networking.firewall.enable = true;
   networking.nat = {
@@ -148,7 +144,7 @@ in
     allowedUDPPorts = [
       53
       67
-      123 # NTP
+      123
     ];
   };
 }

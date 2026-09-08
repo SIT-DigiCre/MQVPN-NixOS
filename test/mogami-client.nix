@@ -2,25 +2,20 @@
   pkgs,
   lib,
   ...
-}: {
+}:
+{
   imports = [ ./test-base.nix ];
 
   networking.hostName = "mogami-client";
-  # NOTE: usePredictableInterfaceNames は VM ビルダーが boot.kernelParams に
-  # net.ifnames=0 を追加するため実質無効。interface 名は常に ethX になる。
 
   virtualisation.vmVariant = {
-    # 管理は mq-mgmt-br0 の tap (mgmt にデフォルトルート無し → テスト経路の外に
-    # 抜ける経路が構造的に存在しない)
     virtualisation.qemu.networkingOptions = lib.mkForce [
       "-nic tap,ifname=tc-mq,script=no,downscript=no,model=virtio-net-pci,mac=52:54:00:12:34:56"
       "-nic tap,ifname=tc-mgmt,script=no,downscript=no,model=virtio-net-pci,mac=52:54:00:12:34:57"
     ];
   };
 
-  # eth0: tap tc-mq → router VM LAN (172.16.0.0/12)
-  # DHCP (kea) から IP / デフォルト GW / DNS (172.16.0.1 = ルーター unbound) を受領 —
-  # 実機 LAN クライアントと同じ動作にする
+  # eth0はrouter LANからDHCP受領 (実機クライアントと同動作)。
   networking.interfaces."eth0" = {
     useDHCP = true;
   };
@@ -54,7 +49,7 @@
 
   users.users.testuser = {
     isNormalUser = true;
-    extraGroups = ["wheel"];
+    extraGroups = [ "wheel" ];
     password = "test";
   };
 

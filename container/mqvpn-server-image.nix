@@ -5,14 +5,12 @@ let
   mqvpnExporter = pkgs.callPackage ../pkgs/mqvpn-exporter.nix { };
   mqvpnDbg = pkgs.callPackage ../pkgs/mqvpn-dbg.nix { };
 
-  # 本家 nat スクリプト + sysctl ラッパ。コンテナから net.* sysctl 書込は
-  # 常に EPERM (値は netns 作成時にホストから継承) ため、sysctl スタブが
-  # net.* への -w のみ成功扱いとする (他は本来の sysctl へ渡す)
+  # nat+sysctlラッパ。コンテナからnet.*書込は常にEPERMのため、
+  # sysctlスタブがnet.*への-wのみ成功扱いにする。
   natScript = pkgs.stdenv.mkDerivation {
     pname = "mqvpn-server-nat";
     inherit (mqvpnDbg) version src;
-    # nat script は mqvpn-src の patches ではなく src から直接コピーされるため、
-    # ここで個別にパッチを当てる (起動時の iface 検出リトライ化)
+    # nat scriptはsrcから直接コピーされるため個別にパッチする。
     patches = [
       ../patches/mqvpn-server-nat-retry-iface.patch
       ../patches/mqvpn-server-nat-teardown-per-subnet.patch
@@ -37,14 +35,13 @@ let
     '';
   };
 
-  # 1 サーバ = 1 コンテナ。config は 1 枚を全インスタンスで共有し、差別化
-  # (仮想サブネット等) は MQVPN_SUBNET / MQVPN_TUN_NAME の env が行う (JSON 専用)
-  # writeTextDir で直接 /mqvpn-oci-entrypoint 配置のレイヤを作る。
-  entrypointLayer = pkgs.writeTextDir "mqvpn-oci-entrypoint" (builtins.readFile ./mqvpn-oci-entrypoint.sh);
+  # 1サーバ=1コンテナ。config共有・差分はenvが行う (導出式はSSOT参照。JSON専用)。
+  entrypointLayer = pkgs.writeTextDir "mqvpn-oci-entrypoint" (
+    builtins.readFile ./mqvpn-oci-entrypoint.sh
+  );
 
-  # buildEnv が各パッケージの bin/ を /bin に統合する。
-  # natScript と procps が共に /bin/sysctl を提供するため衝突し、
-  # 先に列挙した natScript のスタブが優先される (コンテナ内 net.* 書き込みを no-op 化)。
+  # natScriptとprocpsが共に/bin/sysctlを提供するため衝突するが、
+  # 先に列挙したスタブを優先させる (ignoreCollisions)。
   rootEnv = pkgs.buildEnv {
     name = "mqvpn-server-root";
     paths = [
@@ -61,8 +58,7 @@ let
       pkgs.gnugrep
       pkgs.gawk
       pkgs.jq
-      # 運用測定用 (デーモンとしては起動しない。必要時に docker exec で -s を立てる)
-      pkgs.iperf3
+      pkgs.iperf3 # 運用測定用 (docker execで-sを立てる)
     ];
     pathsToLink = [ "/bin" ];
     ignoreCollisions = true;
@@ -77,8 +73,7 @@ let
     ];
     config = {
       Env = [ "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" ];
-      # NOTE: スクリプトの shebang 直 exec が docker (runc) で ENOEXEC になる
-      # ため、インタプリタを明示して起動する
+      # shebang直execはruncでENOEXECになるためインタプリタ明示。
       Cmd = [
         "/bin/bash"
         "${entrypointLayer}/mqvpn-oci-entrypoint"
@@ -94,7 +89,7 @@ let
           "CMD-SHELL"
           "pgrep -f 'mqvpn --config' >/dev/null && ls /sys/class/net | grep -q '^mqvpn'"
         ];
-        # ナノ秒 (time.Duration)。秒で書くと 5ns になり常に unhealthy になる
+        # ナノ秒指定。秒で書くと5nsになり常にunhealthy。
         Interval = 30000000000;
         Timeout = 10000000000;
         StartPeriod = 15000000000;

@@ -2,13 +2,8 @@
   pkgs,
 }:
 let
-  # 公式 grafana イメージをピン (digest + sha256) してベースにし、
-  # provisioning (datasource / dashboards provider / 生成済みダッシュボード) を
-  # 1 レイヤ焼き込む。
-  #
-  # NOTE: この nixpkgs の buildLayeredImage + fromImage は base config のうち
-  # Env しか継承しない (Entrypoint/User/ExposedPorts 等は落ちる) ため、
-  # 必要フィールドは明示する。値はピンした 12.4.9 の Dockerfile/config 由来。
+  # 公式grafanaをピン留めしprovisioning一式を1レイヤ焼き込む。
+  # fromImage継承の注意はdocker-base.nix参照 (値は12.4.9のDockerfile/config由来)。
   grafanaBase = pkgs.callPackage ./docker-base.nix {
     imageName = "grafana/grafana";
     imageDigest = "sha256:9b58461280b4d2992d4399823c9427d0fcf5f0fd7f376c93f2dea876158b867b";
@@ -22,16 +17,9 @@ let
     sha256 = "sha256-3l1g7jmWiCBts8X3BxX0YhsMpDOpouhSaSKFthLkCpQ=";
   };
 
-  # イメージ内の絶対パスに provisioning 一式を配置するレイヤ。
-  # ダッシュボードはサーバー別版へ変換してから焼く (変換の内容は
-  # mqvpn-dashboard-per-server.py を参照: ${DS_PROMETHEUS} 置換 / uid 変更 /
-  # Server テンプレ変数追加 / 全 PROMQL への instance 注入)。
-  # 書込み先 (/var/lib/grafana) は一切触らない:
-  #  - /etc/grafana/provisioning/...  は grafana が読むだけ
-  #  - /etc/grafana/dashboards/...    は provider の読取りパス
-  #    (mon/dashboards.yml 側で同パスに変更済み)
-  # 焼き込みレイヤの所有者は root のため、writable パス (/var/lib/grafana 等) を
-  # 含めると base イメージの所有者 (grafana/472) を上書きして起動失敗する
+  # provisioning一式の配置レイヤ。ダッシュボード変換の内容は
+  # mqvpn-dashboard-per-server.py参照。writableパスを含めるとbaseの所有者
+  # (grafana/472)を上書きして起動失敗するため、/var/lib/grafanaには触らない。
   provisioning =
     pkgs.runCommand "mqvpn-grafana-provisioning"
       {
@@ -43,8 +31,7 @@ let
                  $out/etc/grafana/dashboards
         cp ${./mon/datasource.yml} $out/etc/grafana/provisioning/datasources/datasource.yml
         cp ${./mon/dashboards.yml} $out/etc/grafana/provisioning/dashboards/dashboards.yml
-        # 初期選択のサーバー名は SSOT (./mqvpn-servers.nix) から。
-        # py 側は名前リストを argv で受ける。
+        # 初期選択サーバー名はSSOTから (py側はargvで受ける)。
         python3 ${./dashboards/mqvpn-dashboard-per-server.py} \
           ${mqvpnDashBase} $out/etc/grafana/dashboards/mqvpn-grafana.json ${builtins.concatStringsSep " " (import ./mqvpn-servers.nix).serverNames}
       '';

@@ -1,25 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# =============================================================================
-# mqvpn サーバーのシングルスレッド CPU 飽和を再現する
+# mqvpnサーバーのシングルスレッドCPU飽和を再現する (下流の同時speedtest模擬)。
+# iperf3は1ポート1テストのためクライアント毎に別ポートで並列実行する。
 #
-# 下流で複数クライアントが speedtest を同時実行した状況を模擬する。
-# iperf3 サーバーは 1 ポートにつき 1 テストしか処理できないため、
-# クライアントごとに別ポートでサーバーを立てて並列テストを行う。
-#
-# Usage:
-#   ./test/repro-cpu-saturation.sh [num_clients] [duration_sec]
-#
-# 出力:
-#   - クライアントごとのスループット (Mbit/s) と合計
-#
-# 前提:
-#   - mnet VM に iperfd が常駐 (bench.sh の ensure_iperfd_mnet で起動)
-#   - サーバー→クライアント実IP の戻りルートは不要（ルーター NAPT のため復路は
-#     トンネル端点宛。サーバーの 192.168.0.0/24 connected route で足りる）
-#   - サーバー mqvpn の CPU 負荷は `docker stats` で確認
-# =============================================================================
+# Usage: ./test/repro-cpu-saturation.sh [num_clients] [duration_sec]
+# 前提: mnetにiperfd常駐 (bench.shが起動)。戻りルート不要 (ルーターNAPTのため)。
+# CPU負荷は `docker stats` で確認。
 
 N=${1:-10}
 DUR=${2:-20}

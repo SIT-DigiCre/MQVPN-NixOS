@@ -9,10 +9,8 @@ if [ ! -f "$CONF" ]; then
   exit 1
 fi
 
-# インスタンスインデックスは MQVPN_INSTANCE_IDX で渡す (compose が必ず設定)。
-#   idx から導出: tun_name=mqvpn<idx> / listen=0.0.0.0:(443+idx) /
-#   control_listen=127.0.0.1:(9090+idx*2) / exporter=(9091+idx*2) /
-#   subnet=192.168.<idx>.0/24。明示的な MQVPN_* env があればそれが最優先。
+# インスタンスidxはMQVPN_INSTANCE_IDXで受ける (導出式はSSOT=mqvpn-servers.nix参照)。
+# 明示MQVPN_* envがあれば最優先。
 _OCI_IDX="${MQVPN_INSTANCE_IDX:-}"
 if [ -z "${_OCI_IDX}" ]; then
   echo "mqvpn-oci: MQVPN_INSTANCE_IDX を設定してください。" >&2
@@ -24,8 +22,7 @@ fi
 : "${MQVPN_CONTROL_LISTEN:=127.0.0.1:$((9090 + _OCI_IDX * 2))}"
 : "${MQVPN_EXPORTER_PORT:=$((9091 + _OCI_IDX * 2))}"
 
-# env 上書きは JSON config 専用 — INI と組み合わせると黙って crash loop に
-# 落ちるため、JSON でなければ明示エラーで停止する
+# env上書きはJSON専用 (INIと組むとcrash loopのため明示エラー)。
 if [ -n "${MQVPN_SUBNET:-}" ] || [ -n "${MQVPN_TUN_NAME:-}" ] || [ -n "${MQVPN_LISTEN:-}" ] || [ -n "${MQVPN_CONTROL_LISTEN:-}" ]; then
   if ! jq -e . "$CONF" >/dev/null 2>&1; then
     echo "mqvpn-oci: MQVPN_SUBNET/MQVPN_TUN_NAME/MQVPN_LISTEN/MQVPN_CONTROL_LISTEN 上書きには JSON config が必要です (INI は非対応): $CONF" >&2
@@ -34,23 +31,19 @@ if [ -n "${MQVPN_SUBNET:-}" ] || [ -n "${MQVPN_TUN_NAME:-}" ] || [ -n "${MQVPN_L
   fi
   mkdir -p /tmp
   jq --arg s "${MQVPN_SUBNET:-}" --arg t "${MQVPN_TUN_NAME:-}" \
-     --arg l "${MQVPN_LISTEN:-}" --arg c "${MQVPN_CONTROL_LISTEN:-}" \
+    --arg l "${MQVPN_LISTEN:-}" --arg c "${MQVPN_CONTROL_LISTEN:-}" \
     '(.subnet |= if $s == "" then . else $s end)
      | (.tun_name |= if $t == "" then . else $t end)
      | (.listen |= if $l == "" then . else $l end)
      | (.control_listen |= if $c == "" then . else $c end)' \
-    "$CONF" > /tmp/server.conf
+    "$CONF" >/tmp/server.conf
   CONF=/tmp/server.conf
 fi
 
 echo "mqvpn-oci: nat setup $CONF"
 mqvpn-server-nat.sh setup "$CONF"
 
-# 制御 API は daemon のシングルスレッド内で処理され高負荷時に秒単位で劣化
-# するため、exporter の timeout には余裕を持たせる。
-# ログは stdout に出る (docker logs で scrape 失敗を確認できる)
-# host-network 運用等で制御 API / exporter のポートをずらす場合は
-# MQVPN_CONTROL_LISTEN / MQVPN_EXPORTER_PORT で上書きする。
+# 制御APIは高負荷で秒単位劣化するためexporter timeoutに余裕を持たせる。
 EXPORTER_PORT="${MQVPN_EXPORTER_PORT:-9091}"
 EXPORTER_CTL="${MQVPN_CONTROL_LISTEN:-127.0.0.1:9090}"
 mqvpn-prometheus-exporter -web.listen-address=127.0.0.1:"$EXPORTER_PORT" \

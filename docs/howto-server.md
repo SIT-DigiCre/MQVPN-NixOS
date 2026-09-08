@@ -110,11 +110,9 @@ mqvpn コンテナが `(healthy)` になれば起動成功。クライアント 
 compose に prometheus と grafana が含まれる。
 grafana・exporter は loopback bind のためホスト外から直接は届かない。
 ブラウザアクセスは CF Tunnel 等で `127.0.0.1:3000` を公開すること。
-adminの初期パスワードはadmin(変更すること。)。
 
 Grafana の admin パスワードは compose で平文 `admin` に設定している。
-本番・共有環境では **初回ログイン時に必ず変更** すること
-(admin/admin のまま放置しないよう注意)。
+本番・共有環境では **初回ログイン時に必ず変更** すること。
 
 データの永続化: Prometheus の TSDB と Grafana の DB は **named volume**
 (`prometheus-data` / `grafana-data`) に保存されるため、`--force-recreate` や
