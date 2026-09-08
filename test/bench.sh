@@ -160,8 +160,8 @@ CORESAMP
 }
 
 # --- netem ---
-# WAN NIC 一覧の唯一の情報源は mogami-vm の services.mqvpn.interfaces
-# (= test/mogami-vm.nix の vmWanInterfaces)。flake から導出して同期ずれを防ぐ。
+# WAN NIC 一覧の唯一の情報源は mogami-vm の services.mqvpn.interfaces。
+# flake から導出して同期ずれを防ぐ。
 rtr_wan=($(nix eval --json "path:$(cd "$SCRIPT_DIR/.." && pwd)#nixosConfigurations.mogami-vm.config.services.mqvpn.interfaces" 2>/dev/null | nix shell nixpkgs#jq --command jq -r '.[]' 2>/dev/null || true))
 [ "${#rtr_wan[@]}" -gt 0 ] || { echo "ERROR: WAN NIC 一覧を flake から取得できない" >&2; exit 1; }
 

@@ -13,7 +13,6 @@
   #   WAN: eth1(trw0) + eth3-13(trw1-11) = 12 パス (内 mqvpn が使うのは 3 本)
   vmLanInterface = "eth0";
   vmMgmtInterface = "eth2";
-  vmWanInterfaces = ["eth1" "eth3" "eth4" "eth5" "eth6" "eth7" "eth8" "eth9" "eth10" "eth11" "eth12" "eth13"];
   vmMgmtAddr = "192.168.50.1";
 
   # q35 の既定 NIC スロット上限(~8)を超えるため、各 NIC を明示的な PCIe
@@ -41,35 +40,15 @@ in {
 
   networking.hostName = lib.mkForce "mogami-vm";
 
-  networking.useDHCP = false;
-
-  # LAN / mgmt は静的。WAN は本番同様に DHCP で取得する (ISP シム = ホストの
-  # dnsmasq が MAC ピン留めで 10.200.i.2 + GW 10.200.i.1 を配布)。
-  # DHCP で入る per-WAN デフォルトがキーパー(mqvpn-path-keeper)の
-  # `ip route show dev <wan> default` によるゲートウェイ発見のソース
-  # (本番と同じ経路。キーパーの dhcpcd リースフォールバックは温存)。
-  networking.interfaces = lib.mkMerge [
-    {
-      "${vmLanInterface}" = {
-        useDHCP = false;
-        ipv4.addresses = [{ address = "172.16.0.1"; prefixLength = 12; }];
-      };
-      "${vmMgmtInterface}" = {
-        useDHCP = false;
-        ipv4.addresses = [{ address = vmMgmtAddr; prefixLength = 24; }];
-      };
-    }
-    (lib.listToAttrs (map (name: lib.nameValuePair name {
-      useDHCP = true;
-    }) vmWanInterfaces))
-  ];
-
-  # DHCP デフォルトに per-WAN metric (1-12) を付与し 12 本共存させる
-  # (fail-open 時のフォールバック順序。dhcpcd 既定は 1000+ifindex)。
-  networking.dhcpcd.extraConfig = lib.concatStringsSep "\n" (lib.imap0 (i: name: ''
-    interface ${name}
-    metric ${toString (i + 1)}
-  '') vmWanInterfaces);
+  # mgmt のみ test 固有 (静的・ルート無し)。LAN/WAN は router/ の生成に任せる
+  # (lanInterface・interfaces の mkForce 値から自動導出される)。
+  # 使わない spare WAN (eth5-13) は nixpkgs 既定の 99-* fallback で DHCP 取得
+  # する (metric 1024)。mqvpn が束縛する 3 本の metric 1-3 が常に勝つため
+  # fail-open 順序は保たれる。無害なので明示管理しない。
+  systemd.network.networks."10-mgmt" = {
+    matchConfig.Name = vmMgmtInterface;
+    address = [ "${vmMgmtAddr}/24" ];
+  };
 
   # qemu の NIC 構成を完全に明示 (ビルダー既定の user-net を含め一切自動追加させない)。
   # MAC は 3 VM 間で共有ブリッジ上ユニークになるよう明示 (-nic の MAC 省略時は

@@ -35,7 +35,6 @@
       "/var/lib/systemd/timers"
       "/var/lib/nixos"
       "/var/log"
-      "/var/lib/dhcpcd"
       "/var/lib/unbound"
       {
         directory = "/var/lib/private/kea";

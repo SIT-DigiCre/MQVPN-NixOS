@@ -131,7 +131,8 @@
           # ECMP ライフサイクルは systemd-networkd が担う (下記参照)。
           #  - サーバー制御プレーン経路のピン (manage_routes=false のため上流の setup_routes
           #    は動かない。WAN デフォルトが消えても <server>/32 を GW 経由で維持する。
-          #    GW は可視デフォルト優先・無ければ dhcpcd リースで補完し、変化時のみ更新)
+          #    GW は可視デフォルト優先。消失時は networkd reconfigure で自癒し、
+          #    変化時のみ pin を更新
           #  - router-local → tunnel の SNAT 確保 (tun_validate_src 対策):
           #    router 側 mqvpn は TUN-ingress の src≠自 tunnel IP を silent drop する。
           #    LAN 側は NAT mark (0x1) で MASQUERADE され out-dev addr になるため常時一致
@@ -152,8 +153,7 @@
               iproute2
               gawk
               iptables
-              # ピン用 GW の補完発見 (dhcpcd -U で現在リースを読む)
-              dhcpcd
+              systemd
             ];
 
             serviceConfig = {
@@ -165,17 +165,23 @@
                 # 最後に観測した WAN デフォルトの nexthops (GW 変更凍結の防止 — 前回の記憶)
                 wan_nexthops=""
                 while true; do
-                  # 1) WAN GW の発見 (可視デフォルト優先、無ければ dhcpcd リースで補完) +
-                  #    サーバーピン (/32 を nexthop 1 回で replace。IF ごとに分けると
-                  #    最後の 1 本しか残らない)
+                  # 1) WAN GW の発見 (可視デフォルト優先) + サーバーピン
+                  #    (/32 を nexthop 1 回で replace。IF ごとに分けると
+                  #    最後の 1 本しか残らない)。
+                  #    デフォルト消失時 (carrier はあるのに経路だけ無い) は
+                  #    networkd に reconfigure させて DHCP 取り直しで自癒する
+                  #    (復旧は次ループで可視デフォルトとして読む。今回は pin の
+                  #    前回記憶を維持するためスキップ)。
                   new_wan=""
                   if [ -n "$server_host" ]; then
                     for ifx in $wan_ifaces; do
                       gw=$(ip -4 route show dev "$ifx" default 2>/dev/null | awk '{print $3; exit}')
                       if [ -z "$gw" ] || [ "$gw" = "0.0.0.0" ]; then
-                        gw=$(dhcpcd -U "$ifx" 2>/dev/null | sed -n 's/^routers=//p' | awk '{print $1}')
+                        if ip link show dev "$ifx" 2>/dev/null | grep -q "LOWER_UP"; then
+                          networkctl reconfigure "$ifx" 2>/dev/null || true
+                        fi
+                        continue
                       fi
-                      [ -n "$gw" ] && [ "$gw" != "0.0.0.0" ] || continue
                       # 複数 nexthop のマルチパスには nexthop キーワードが必須
                       # (単一時も有効。無いと replace 失敗しサーバー宛がトンネル内をループする)
                       new_wan="$new_wan nexthop via $gw dev $ifx"
