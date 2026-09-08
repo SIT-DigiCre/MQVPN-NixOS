@@ -23,36 +23,27 @@ let
   };
 
   # prometheus.yml を生成して /etc/prometheus/ に配置するレイヤ。
-  # mqvpn job の targets は compose の mqvpn-server-* サービス +
-  # MQVPN_INSTANCE_IDX から作る: 127.0.0.1:(9091+idx*2)。
-  # YAML 読みは yq に任せ、手書き正規表現は持たない
+  # targets はサーバー集合の SSOT (./mqvpn-servers.nix) から作る。
   # instance ラベルはサービス名に固定する (Grafana の Server 変数 =
   # label_values(mqvpn_build_info, instance) と焼き込み済み初期選択が一致する)。
   prometheusConf =
-    pkgs.runCommand "mqvpn-prometheus-etc"
-      {
-        nativeBuildInputs = [ pkgs.yq-go ];
-      }
-      ''
+    let
+      servers = import ./mqvpn-servers.nix;
+      # "name port" 行 (exporter 待受 = 9091+idx*2 は entrypoint 側の導出と同一)。
+      serverTargets = builtins.concatStringsSep "\n" (
+        map (i: "mqvpn-server-${toString i} ${toString (9091 + i * 2)}") servers.serverIdxs
+      );
+    in
+    assert servers.serverIdxs != [];
+    pkgs.runCommand "mqvpn-prometheus-etc" { } ''
         mkdir -p $out/etc/prometheus
-        mapfile -t svcs < <(yq --yaml-fix-merge-anchor-to-spec -r '.services | to_entries[] | select(.key | test("^mqvpn-server-[0-9]+$")) | .key' ${./docker-compose.yml})
-        [ "''${#svcs[@]}" -gt 0 ] || { echo "compose に mqvpn-server-* が見つからない" >&2; exit 1; }
         {
-          cat <<'YAML'
-        global:
-          scrape_interval: 30s
-          scrape_timeout: 30s
-
-        scrape_configs:
-          - job_name: mqvpn
-            static_configs:
-        YAML
-          for n in "''${svcs[@]}"; do
-            idx=$(n="$n" yq --yaml-fix-merge-anchor-to-spec -r '.services[env(n)].environment[] | select(test("^MQVPN_INSTANCE_IDX=")) | split("=")[1]' ${./docker-compose.yml})
-            [ -n "$idx" ] || { echo "$n に MQVPN_INSTANCE_IDX がない (host-net では必須)" >&2; exit 1; }
-            [[ "$idx" =~ ^[0-9]+$ ]] || { echo "$n の MQVPN_INSTANCE_IDX が数値でない: $idx" >&2; exit 1; }
-            printf '      - targets:\n          - "127.0.0.1:%d"\n        labels:\n          instance: %s\n          stack: mqvpn\n\n' "$((9091 + idx * 2))" "$n"
-          done
+          printf 'global:\n  scrape_interval: 30s\n  scrape_timeout: 30s\n\nscrape_configs:\n  - job_name: mqvpn\n    static_configs:\n'
+          while read -r n p; do
+            printf '      - targets:\n          - "127.0.0.1:%s"\n        labels:\n          instance: %s\n          stack: mqvpn\n\n' "$p" "$n"
+          done <<EOF
+      ${serverTargets}
+      EOF
         } > $out/etc/prometheus/prometheus.yml
       '';
 

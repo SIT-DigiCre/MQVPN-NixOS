@@ -79,8 +79,9 @@ echo 'tun' | sudo tee /etc/modules-load.d/tun.conf
 sudo modprobe tun
 ls -l /dev/net/tun   # 存在すれば OK
 
-# ファイアウォール (例: ufw) — 443 を開放
-sudo ufw allow 443/udp
+# ファイアウォール (例: ufw) — サーバー台数分の UDP ポートを開放
+# (443+idx。現行 3 台構成なら 443:445。増設時は範囲を広げる)
+sudo ufw allow 443:445/udp
 ```
 
 ## 6. compose の配置と起動
@@ -88,12 +89,14 @@ sudo ufw allow 443/udp
 ```sh
 # リポジトリを clone し、その container/ 配下で compose を実行する
 # (公開リポジトリは認証なしで clone 可。./mqvpn-server-conf が相対パスで解決される)
+# compose は SSOT からの生成物 (bundle 同梱) を取り出す
+cp result/docker-compose.yml mqvpn-nixos/container/
 cd mqvpn-nixos/container
 
 # 設定焼き込み済みイメージは §3 で docker load 済みであること。
 # イメージのタグは mqvpn-server:latest / mqvpn-prometheus:latest /
 # mqvpn-grafana:latest。手動で編集する設定は無い (scrape targets と
-# ダッシュボードは nix ビルド時に compose から自動生成・焼き込み済み)
+# ダッシュボードは nix ビルド時に SSOT から自動生成・焼き込み済み)
 
 sudo docker compose up -d
 sudo docker compose ps
@@ -105,12 +108,9 @@ mqvpn コンテナが `(healthy)` になれば起動成功。クライアント 
 ## 7. 監視 (Prometheus / Grafana)
 
 compose に prometheus と grafana が含まれる。
-grafanaはホストの3000番ポートで公開される。
+grafana・exporter は loopback bind のためホスト外から直接は届かない。
+ブラウザアクセスは CF Tunnel 等で `127.0.0.1:3000` を公開すること。
 adminの初期パスワードはadmin(変更すること。)。
-
-```
-ブラウザ: http://<サーバーIP>:3000
-```
 
 Grafana の admin パスワードは compose で平文 `admin` に設定している。
 本番・共有環境では **初回ログイン時に必ず変更** すること
@@ -127,16 +127,17 @@ ECMP (同一ホスト上でクライアントインスタンスを複数立ち�
 同時接続) の場合 — 本ラボのルーター (`configuration.nix` の
 `services.mqvpn.clientPorts`) がその構成:
 
-1. **compose**: `mqvpn-server-2` を anchor 継承で追加 (ポートを変えるだけ —
-   boilerplate は `x-mqvpn-server` 参照)
-2. **prometheus イメージを再ビルド**: scrape targets はビルド時に compose から
-   自動生成されるため、compose の編集以外の手編集は不要:
+1. **サーバー台帳**: `container/mqvpn-servers.nix` の `serverIdxs` に追加 —
+   compose・prometheus・grafana・FW・クライアントports が全連動する
+2. **compose とイメージを再生成・再投入** (compose は bundle 同梱):
    ```sh
-    cd mqvpn-nixos && nix build .#mqvpn-oci && bash result/load-all.sh
-   cd mqvpn-nixos/container && sudo docker compose up -d --force-recreate prometheus
+   cd mqvpn-nixos && nix build .#mqvpn-oci && bash result/load-all.sh
+   cp result/docker-compose.yml container/
+   cd mqvpn-nixos/container && sudo docker compose up -d --force-recreate
    ```
-3. **クライアント側**: ルーターのトンネル定義に新ポート (444 等) を追加 —
-   tun_name はクライアント側テンプレートが自動で一意化する
+   (prometheus targets・grafana 初期選択も SSOT から再生成される)
+3. **クライアント側**: `clientPorts` は SSOT 連動のため、ルーターの再ビルド
+   (nixos-rebuild 等) で新ポートが反映される。手編集は不要
 
 > 補足: 仮想 subnet が被っても、重複アドレスの割り当てはカーネルが許容し、
 > backnet 宛トラフィックは ECMP (default ルート) でトンネル間を分割されるため
@@ -145,14 +146,15 @@ ECMP (同一ホスト上でクライアントインスタンスを複数立ち�
 
 ## 9. 更新
 
- ```sh
-  cd mqvpn-nixos
-  git pull
-  nix build .#mqvpn-oci
-  bash result/load-all.sh
-  cd mqvpn-nixos/container
-  sudo docker compose up -d --force-recreate
- ```
+  ```sh
+   cd mqvpn-nixos
+   git pull
+   nix build .#mqvpn-oci
+   bash result/load-all.sh
+   cp result/docker-compose.yml container/
+   cd mqvpn-nixos/container
+   sudo docker compose up -d --force-recreate
+  ```
 
 ## 10. トラブルシュート
 

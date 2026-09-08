@@ -53,7 +53,7 @@ mqvpn-server-nat.sh setup "$CONF"
 # MQVPN_CONTROL_LISTEN / MQVPN_EXPORTER_PORT で上書きする。
 EXPORTER_PORT="${MQVPN_EXPORTER_PORT:-9091}"
 EXPORTER_CTL="${MQVPN_CONTROL_LISTEN:-127.0.0.1:9090}"
-mqvpn-prometheus-exporter -web.listen-address=0.0.0.0:"$EXPORTER_PORT" \
+mqvpn-prometheus-exporter -web.listen-address=127.0.0.1:"$EXPORTER_PORT" \
   -mqvpn.address="$EXPORTER_CTL" -mqvpn.timeout=30s \
   -mqvpn.scrape-budget=25s &
 

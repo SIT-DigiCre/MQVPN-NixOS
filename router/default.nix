@@ -19,11 +19,7 @@
       "enp9s0"
     ];
     auth = builtins.fromJSON (builtins.readFile ../mqvpn-auth.json);
-    clientPorts = [
-      443
-      444
-      445
-    ];
+    clientPorts = (import ../container/mqvpn-servers.nix).serverPorts;
     cc = "bbr";
     lanInterface = "enp10s0";
     hybrid = {

@@ -1,3 +1,4 @@
 mqvpn-auth.json
 *.qcow2
 result*
+container/docker-compose.yml

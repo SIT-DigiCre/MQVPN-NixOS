@@ -8,13 +8,18 @@ let
   # eth2: ts-ext (mnet VM 192.168.100.1 へのベンチ用出口)
   vmLanInterface = "eth1";
   vmWanInterface = "eth0";
-  mqvpnServerSubnet = "192.168.0.0/24";
+
+  firstIdx = builtins.head mqvpnServers.serverIdxs;
+  firstPort = builtins.head mqvpnServers.serverPorts;
+  mqvpnServerSubnet = "192.168.${toString firstIdx}.0/24";
   mqvpnAuthKey = "mqvpn-test-key-2024";
   localIp = "10.200.99.2";
 
   mqvpnImage = (import ../container/mqvpn-server-image.nix { inherit pkgs; }).image;
   mqvpnPromImage = (import ../container/mqvpn-prometheus-image.nix { inherit pkgs; }).image;
   mqvpnGrafanaImage = (import ../container/mqvpn-grafana-image.nix { inherit pkgs; }).image;
+
+  mqvpnServers = import ../container/mqvpn-servers.nix;
 
   mqvpnCerts =
     pkgs.runCommand "mqvpn-certs"
@@ -32,13 +37,13 @@ let
   # コンテナは /etc/mqvpn/ 配下を参照する
   mqvpnServerBase = {
     mode = "server";
-    listen = "0.0.0.0:443";
+    listen = "0.0.0.0:${toString firstPort}";
     subnet = mqvpnServerSubnet;
-    tun_name = "mqvpn0";
+    tun_name = "mqvpn${toString firstIdx}";
     cert_file = "/etc/mqvpn/server.crt";
     key_file = "/etc/mqvpn/server.key";
     auth_key = mqvpnAuthKey;
-    control_listen = "127.0.0.1:9090";
+    control_listen = "127.0.0.1:${toString (9090 + firstIdx * 2)}";
     log_level = "info";
     reinjection = "deadline";
     reorder = {
@@ -58,14 +63,14 @@ let
   mqvpnConf = pkgs.writeText "mqvpn-server.conf" (builtins.toJSON mqvpnServerBase);
 
   # compose 一式を 1 つの store ディレクトリに固める (compose の相対パス解決のため)。
-  # prometheus / grafana は設定焼き込み済みの nix イメージを使うため、
-  # ここに必要なのは compose ファイル + サーバー設定のみ。
+  # compose 本体は SSOT 生成物 (container/mqvpn-compose-file.nix) を使う。
+  composeFile = pkgs.callPackage ../container/mqvpn-compose-file.nix { };
   composeDir = pkgs.stdenv.mkDerivation {
     name = "mqvpn-compose-dir";
     phases = [ "installPhase" ];
     installPhase = ''
       mkdir -p $out/mqvpn-server-conf
-      cp ${../container/docker-compose.yml} $out/docker-compose.yml
+      cp ${composeFile} $out/docker-compose.yml
       cp -r ${mqvpnSrv}/* $out/mqvpn-server-conf/
     '';
   };
@@ -145,7 +150,7 @@ in
   networking.nat = {
     enable = true;
     externalInterface = "eth2";
-    internalInterfaces = [ "mqvpn0" "mqvpn1" "mqvpn2" ];
+    internalInterfaces = map (i: "mqvpn${toString i}") mqvpnServers.serverIdxs;
   };
 
   virtualisation.docker.enable = true;
@@ -217,13 +222,8 @@ in
 
   networking.firewall.allowedTCPPorts = [
     22 # SSH
-    3000 # grafana (browser アクセス用)
   ];
-  networking.firewall.allowedUDPPorts = [
-    443
-    444
-    445
-  ];
+  networking.firewall.allowedUDPPorts = mqvpnServers.serverPorts;
 
   boot.initrd.systemd.enable = false;
 

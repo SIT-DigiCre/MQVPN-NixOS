@@ -1,5 +1,4 @@
 {
-  config,
   lib,
   pkgs,
   ...
@@ -114,8 +113,8 @@ in {
   services.mqvpn.interfaces = lib.mkForce [ "eth1" "eth3" "eth4" ];
   services.mqvpn.lanInterface = lib.mkForce vmLanInterface;
 
-  # クライアントは port リストで定義 (IP は auth.server_addr、WAN NIC は interfaces)
-  services.mqvpn.clientPorts = lib.mkForce [ 443 444 445 ];
+  # クライアントは port リストで定義 (IP は auth.server_addr、WAN NIC は interfaces)。
+  services.mqvpn.clientPorts = lib.mkForce (import ../container/mqvpn-servers.nix).serverPorts;
 
   services.openssh.settings.PasswordAuthentication = lib.mkForce true;
 

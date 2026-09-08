@@ -36,11 +36,15 @@
           mqvpnGrafanaOci = import ./container/mqvpn-grafana-image.nix { inherit pkgs; };
           # 3 イメージを 1 つのバンドルにまとめる (ビルド/ロードを 1 コマンドに)。
           # 出力ディレクトリに各 tar への symlink と、docker load 一括スクリプトを置く。
+          # compose も同梱する (image と版本を一致させるため。実機では
+          # result/docker-compose.yml を container/ にコピーして使う)。
+          mqvpnComposeFile = pkgs.callPackage ./container/mqvpn-compose-file.nix { };
           mqvpnOciBundle = pkgs.runCommand "mqvpn-oci-bundle" { } ''
             mkdir -p $out
             ln -s ${mqvpnServerOci.image} $out/mqvpn-server.tar
             ln -s ${mqvpnPrometheusOci.image} $out/mqvpn-prometheus.tar
             ln -s ${mqvpnGrafanaOci.image} $out/mqvpn-grafana.tar
+            cp ${mqvpnComposeFile} $out/docker-compose.yml
             cat > $out/load-all.sh <<'EOF'
             #!/bin/sh
             d=$(cd "$(dirname "$0")" && pwd)

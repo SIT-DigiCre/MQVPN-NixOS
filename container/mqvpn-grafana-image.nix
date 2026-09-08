@@ -35,7 +35,7 @@ let
   provisioning =
     pkgs.runCommand "mqvpn-grafana-provisioning"
       {
-        nativeBuildInputs = [ pkgs.python3 pkgs.yq-go ];
+        nativeBuildInputs = [ pkgs.python3 ];
       }
       ''
         mkdir -p $out/etc/grafana/provisioning/datasources \
@@ -43,11 +43,10 @@ let
                  $out/etc/grafana/dashboards
         cp ${./mon/datasource.yml} $out/etc/grafana/provisioning/datasources/datasource.yml
         cp ${./mon/dashboards.yml} $out/etc/grafana/provisioning/dashboards/dashboards.yml
-        # 初期選択のサーバー名は compose から yq で取る (手書きパースなし)。
+        # 初期選択のサーバー名は SSOT (./mqvpn-servers.nix) から。
         # py 側は名前リストを argv で受ける。
-        mapfile -t svcs < <(yq --yaml-fix-merge-anchor-to-spec -r '.services | to_entries[] | select(.key | test("^mqvpn-server-[0-9]+$")) | .key' ${./docker-compose.yml})
         python3 ${./dashboards/mqvpn-dashboard-per-server.py} \
-          ${mqvpnDashBase} $out/etc/grafana/dashboards/mqvpn-grafana.json "''${svcs[@]}"
+          ${mqvpnDashBase} $out/etc/grafana/dashboards/mqvpn-grafana.json ${builtins.concatStringsSep " " (import ./mqvpn-servers.nix).serverNames}
       '';
 
   image = pkgs.dockerTools.buildLayeredImage {

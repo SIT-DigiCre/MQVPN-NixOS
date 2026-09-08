@@ -53,8 +53,8 @@ mnet / 上流へ出す。mnet 宛は NAT2 後に server VM の eth2 (mq-ext-br0)
 
 | # | NAT 元 → 出力先 | 実施場所 |
 |---|----------------|----------|
-| 1 | `172.16.0.0/12` → `mqvpn0/1` (mark ベース MASQUERADE) | Router VM (`configuration.nix` の mqvpn モジュール。iptables 行は `configuration.nix:214`) |
-| 2 | `192.168.0.0/24`、`192.168.1.0/24` → `eth0` (本家スクリプト) | Server VM OCI コンテナ (`container/mqvpn-server-image.nix`) |
+| 1 | `172.16.0.0/12` → `mqvpn0/1/2` (mark ベース MASQUERADE) | Router VM (`router/network.nix` の NAT + `router/mqvpn.nix` の keeper SNAT) |
+| 2 | `192.168.0.0/24`、`192.168.1.0/24`、`192.168.2.0/24` → `eth0` (本家スクリプト) | Server VM OCI コンテナ (`container/mqvpn-server-image.nix`) |
 
 - **NAT 1**: ルーターが LAN トラフィックを MQVPN トンネルへ通す。
 - **NAT 2**: サーバーコンテナのエントリポイントが `/etc/mqvpn/server*.conf` ごとに
@@ -117,8 +117,5 @@ VM ビルダーが `net.ifnames=0` を強制するためインターフェース
 | 操作 | コマンド |
 |------|----------|
 | ビルド + ブリッジ作成 | `./test/build-mogami-lab.sh` |
-| ルーター起動（フォアグラウンド） | `./test/start-mogami-router.sh` |
-| サーバー起動（フォアグラウンド） | `./test/start-mogami-server.sh` |
-| クライアント起動（フォアグラウンド） | `./test/start-mogami-client.sh` |
-| mnet 起動（フォアグラウンド） | `./test/start-mogami-mnet.sh` |
+| VM起動（フォアグラウンド） | `./test/start-vm.sh <server\|router\|client\|mnet>` |
 | 終了・クリーンアップ | `./test/stop-mogami-lab.sh` |

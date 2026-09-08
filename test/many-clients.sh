@@ -13,7 +13,7 @@ set -euo pipefail
 #     2. conntrack / NAT テーブルのスケール未検証: 単一 IP の P=20 と 70IP×1 は
 #        エントリ数が違い、GC・衝突・上限の出方が違う。
 #     3. DHCP (Kea) / ARP / DNS (unbound) の多端末負荷が未測定:
-#        140 並列 DNS で 34% 欠損した事例あり (configuration.nix の unbound 注释)。
+#        140 並列 DNS で 34% 欠損した事例あり (router/network.nix の unbound 設定)。
 #     4. トラフィック mix が bulk のみ: 実態は多数の小フロー + たまの speedtest。
 #
 # 方式: client VM 内に N 個の仮想クライアントを生やす。2 モード:
